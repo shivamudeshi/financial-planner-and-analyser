@@ -254,6 +254,127 @@ def cmd_sip(args) -> int:
     return 0
 
 
+def cmd_rules(args) -> int:
+    from .rules import backtest as bt_mod
+    from .rules.context import FIELDS
+    from .rules.engine import RulesEngine, describe, load_rules
+
+    conn = connect(args.db)
+    as_of = args.as_of or Date.today().isoformat()
+    engine = TaxEngine(args.fy or financial_year(as_of))
+
+    if args.rules_command == "fields":
+        print("\n  Fields available in rule conditions and messages\n")
+        for name, meaning in FIELDS.items():
+            print(f"    {name:<22} {meaning}")
+        print()
+        return 0
+
+    if args.rules_command == "list":
+        rules, warnings = load_rules()
+        print(f"\n  {len(rules)} rule(s) in {bt_mod.__name__.rsplit('.', 1)[0]}/rules.yaml\n")
+        for r in describe(rules):
+            state = "" if r["enabled"] else "  (disabled)"
+            print(f"    {r['name']:<28} [{r['severity']:<6}] {r['condition']}{state}")
+            if r["scope"] != "all":
+                print(f"      scope {r['scope']}, cooldown {r['cooldown_days']}d")
+        for w in warnings:
+            print(f"\n  ⚠  {w}")
+        print()
+        return 1 if warnings else 0
+
+    if args.rules_command == "backtest":
+        rules, _ = load_rules()
+        matches = [r for r in rules if r.name == args.rule]
+        if not matches:
+            print(f"No rule named {args.rule!r}. Try `fpa rules list`.", file=sys.stderr)
+            return 2
+        rule = matches[0]
+        result = bt_mod.Backtester(conn, engine).run(
+            rule, end=as_of, step_days=args.step, start=args.start
+        )
+        print(f"\n  Backtest — {rule.name}")
+        print(f"  {'─' * 74}")
+        print(f"  Condition: {result.condition}")
+        print(f"  {result.start} to {result.end}, every {result.step_days} days, "
+              f"{result.dates_tested:,} evaluations\n")
+        print(f"    {'Horizon':<10}{'After firing':>14}{'Base rate':>12}{'Edge':>10}")
+        for h in result.base_rate:
+            med, base, edge = result.median_forward(h), result.base_rate[h], result.edge(h)
+            print(f"    {str(h) + 'd':<10}{_fmt_pct(med):>14}{_fmt_pct(base):>12}"
+                  f"{_fmt_pct(edge, signed=True):>10}")
+        print(f"\n  {result.verdict(90)}")
+        if result.firings and args.show:
+            print(f"\n  Firings ({min(args.show, result.count)} of {result.count}):")
+            for f in result.firings[: args.show]:
+                fwd = f.forward.get(90)
+                print(f"    {f.date}  {f.subject[:30]:<30} "
+                      f"90d after: {_fmt_pct(fwd):>8}   {f.context}")
+        for n in result.notes:
+            print(f"\n  · {n}")
+        print()
+        return 0
+
+    # default: check
+    rules_engine = RulesEngine(conn, tax_engine=engine)
+    result = rules_engine.run(as_of, persist=not args.dry_run)
+
+    print(f"\n  Rules — {as_of}")
+    print(f"  {'─' * 74}")
+    print(f"  {result.rules_evaluated} rule(s) against {result.subjects_evaluated} subject(s)")
+    if not result.fired:
+        print("\n  Nothing fired.")
+    for severity in ("high", "medium", "info"):
+        group = [a for a in result.fired if a.severity == severity]
+        if not group:
+            continue
+        print(f"\n  {severity.upper()}")
+        for a in group:
+            print(f"    {a.subject[:34]:<34} {a.message}")
+            if args.why:
+                facts = {k: v for k, v in a.context.items() if not k.startswith("__")}
+                print(f"      because: {facts}")
+
+    if result.suppressed_cooldown or result.already_open:
+        print(f"\n  {result.suppressed_cooldown} suppressed by cooldown, "
+              f"{result.already_open} already open.")
+    if args.dry_run:
+        print("  Dry run — no alerts were saved.")
+    for w in result.warnings:
+        print(f"  ⚠  {w}")
+    print()
+    return 0
+
+
+def cmd_alerts(args) -> int:
+    from .rules.engine import RulesEngine
+
+    conn = connect(args.db)
+    engine = RulesEngine(conn)
+
+    if args.alert_id and args.status:
+        engine.set_status(args.alert_id, args.status.upper())
+        print(f"Alert {args.alert_id} marked {args.status.upper()}.")
+        return 0
+
+    alerts = engine.open_alerts(include_muted=args.all)
+    if not alerts:
+        print("\n  No open alerts.\n")
+        return 0
+    print(f"\n  {len(alerts)} open alert(s)\n")
+    for a in alerts:
+        print(f"    #{a.id:<4} [{a.severity:<6}] {a.fired_on}  {a.subject[:28]:<28} {a.status}")
+        print(f"          {a.message}")
+    print("\n  Mark one:  fpa alerts <id> --status acked|acted|muted\n")
+    return 0
+
+
+def _fmt_pct(value: float | None, *, signed: bool = False) -> str:
+    if value is None:
+        return "—"
+    return f"{value:+.1f}%" if signed else f"{value:.1f}%"
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="fpa", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -314,6 +435,39 @@ def main(argv: list[str] | None = None) -> int:
                    help="annual step-up percent, applied on each anniversary")
     a.add_argument("--cap", type=float, default=None, help="ceiling in rupees")
     a.set_defaults(func=cmd_sip, sip_command="add", fy=None, as_of=None, project=0)
+
+    s = sub.add_parser("rules", help="evaluate, inspect and backtest your exit rules")
+    rules_sub = s.add_subparsers(dest="rules_command")
+    s.add_argument("--as-of", default=None)
+    s.add_argument("--fy", default=None)
+    s.add_argument("--dry-run", action="store_true", help="evaluate without saving alerts")
+    s.add_argument("--why", action="store_true", help="show the facts that fired each rule")
+    s.set_defaults(func=cmd_rules, rules_command="check")
+
+    for name, helptext in (("check", "evaluate all rules now"),
+                           ("list", "show the configured rules"),
+                           ("fields", "list fields usable in conditions")):
+        sp = rules_sub.add_parser(name, help=helptext)
+        sp.add_argument("--as-of", default=None)
+        sp.add_argument("--fy", default=None)
+        sp.add_argument("--dry-run", action="store_true")
+        sp.add_argument("--why", action="store_true")
+        sp.set_defaults(func=cmd_rules, rules_command=name)
+
+    sp = rules_sub.add_parser("backtest", help="replay a rule over history")
+    sp.add_argument("rule")
+    sp.add_argument("--start", default=None)
+    sp.add_argument("--as-of", default=None)
+    sp.add_argument("--fy", default=None)
+    sp.add_argument("--step", type=int, default=7, help="days between evaluations")
+    sp.add_argument("--show", type=int, default=0, help="print the first N firings")
+    sp.set_defaults(func=cmd_rules, rules_command="backtest", dry_run=False, why=False)
+
+    s = sub.add_parser("alerts", help="list open alerts or change one's status")
+    s.add_argument("alert_id", nargs="?", type=int, default=None)
+    s.add_argument("--status", choices=["acked", "acted", "muted", "new"], default=None)
+    s.add_argument("--all", action="store_true", help="include muted and closed")
+    s.set_defaults(func=cmd_alerts)
 
     args = p.parse_args(argv)
     return args.func(args)

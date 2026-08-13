@@ -186,6 +186,49 @@ def _consume(
     return made
 
 
+def replay_lots(
+    conn: sqlite3.Connection, instrument_id: int, as_of: str
+) -> list[OpenLot]:
+    """Reconstruct open lots as they stood on ``as_of``, without touching the DB.
+
+    The ``lots`` table holds *current* remaining quantities, so it cannot answer
+    "what did I hold last March?" — which is exactly what a backtest needs.
+    This replays the same FIFO logic over transactions up to a date and returns
+    the result in memory.
+    """
+    open_: list[OpenLot] = []
+    rows = conn.execute(
+        "SELECT * FROM transactions WHERE instrument_id=? AND date <= ? ORDER BY date, id",
+        (instrument_id, as_of),
+    )
+    for txn in rows:
+        kind, qty = txn["kind"], txn["quantity"]
+
+        if kind in ("BUY", "SIP", "SWITCH_IN", "BONUS"):
+            if qty <= QTY_EPS:
+                continue
+            cost = 0 if kind == "BONUS" else abs(txn["amount"]) + txn["charges"]
+            open_.append(OpenLot(txn["id"], instrument_id, txn["date"], qty, qty,
+                                 round(cost / qty)))
+
+        elif kind == "SPLIT" and qty > 0:
+            for lot in open_:
+                lot.quantity *= qty
+                lot.remaining_qty *= qty
+                lot.cost_per_unit = round(lot.cost_per_unit / qty)
+
+        elif kind in ("SELL", "SWITCH_OUT"):
+            to_sell = qty
+            for lot in open_:
+                if to_sell <= QTY_EPS:
+                    break
+                take = min(lot.remaining_qty, to_sell)
+                lot.remaining_qty -= take
+                to_sell -= take
+
+    return [l for l in open_ if l.remaining_qty > QTY_EPS]
+
+
 def open_lots(conn: sqlite3.Connection, instrument_id: int | None = None) -> list[OpenLot]:
     sql = "SELECT * FROM lots WHERE remaining_qty > ?"
     args: list = [QTY_EPS]

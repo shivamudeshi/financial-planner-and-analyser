@@ -401,7 +401,71 @@ fixtures: the parse reconciled perfectly and the import still silently dropped 1
 
 ---
 
-## 9. Rules engine — ongoing alerts
+## 9. Rules engine — ongoing alerts  ✅ built
+
+Declarative rules in `rules.yaml`, evaluated against today's positions, producing **alerts** — never
+orders. Four decisions carry the design.
+
+### Conditions are not `eval()`
+
+A rules file is configuration: it gets copied between machines and pasted from notes. An evaluator
+that can reach `__import__` turns a config typo into arbitrary code execution. So expressions are
+parsed to an AST and walked against a **whitelist** — attribute access, subscripting, lambdas,
+comprehensions and imports are rejected at load time, not at evaluation time. Twelve sandbox-escape
+attempts are in the suite.
+
+Unknown *names* are errors rather than `None`, because a rule that silently evaluates a typo'd field
+to nothing is a rule that silently never fires.
+
+### Missing data means "don't fire"
+
+A fund with three weeks of NAV history has no 200-day average. `sma200 = 0` would make every "price
+above its 200 DMA" rule fire on it, so unavailable readings are `None` and a rule naming them simply
+does not fire. `and` short-circuits, so `has_price_history and rsi14 < 30` works as a guard.
+
+### Noise control is a correctness concern
+
+An alert list you have stopped reading is worse than no alerts. Two mechanisms:
+
+- A rule will not re-fire while an alert for the same rule *and subject* is still open.
+- `cooldown_days` stops a persistent condition reappearing daily — a breached stop-loss stays
+  breached, and reminding you every morning trains you to ignore the list.
+
+### Alerts must stay explainable
+
+Three months later the question is "why did this fire?", and a rule name does not answer it. Each
+alert stores a JSON snapshot of **the fields the condition actually referenced** — not the whole
+40-field context, because the two that fired the rule are the ones worth reading.
+
+### Backtesting: the base rate is the point
+
+`fpa rules backtest <name>` replays a rule over real price and transaction history and reports what
+happened next. Crucially it reports that **against the base rate** — the median forward return
+across every tested date, fired or not.
+
+"The position fell 3% after this fired" looks like a working sell signal until you notice the market
+fell 5% over every window in that period. A rule earns its place by beating the base rate, not by
+being directionally right in a falling market. The `edge` figure is the difference, and a rule with
+a *positive* edge is reported as counterproductive — it sold your winners.
+
+Two honest limits, printed rather than buried: one portfolio over a few years is an anecdote, so the
+verdict refuses to conclude below ten firings; and `weight_pct` is not reconstructed historically,
+so rules using it are not backtestable.
+
+No lookahead: indicators are computed over the full series then sliced by date, which is safe
+because SMA, RSI and MACD are causal. Positions come from `replay_lots`, which replays transactions
+to reconstruct holdings as they actually stood — the `lots` table holds *current* quantities and
+cannot answer "what did I hold last March?".
+
+### Rule-writing guidance
+
+Prefer **few, simple, explainable** rules. A rule you can restate in one sentence is one you will
+act on. A dozen tuned indicator rules will fire constantly, you will start ignoring the list, and
+then the alerting is worth less than nothing.
+
+---
+
+## 9b. Rules engine — original sketch
 
 Declarative YAML, evaluated every evening after prices refresh. Each rule produces alerts, never
 orders.

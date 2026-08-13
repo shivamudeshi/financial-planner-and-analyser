@@ -17,6 +17,8 @@ from fpa.planner import cashflow
 from fpa.planner.opportunity import OpportunityAnalyser
 from fpa.planner.sell_planner import Mode, SellPlanner
 from fpa.portfolio import positions
+from fpa.rules.backtest import Backtester
+from fpa.rules.engine import RulesEngine, describe
 from fpa.tax.engine import TaxEngine, Term
 
 st.set_page_config(page_title="Financial Planner & Analyser", page_icon="📊", layout="wide")
@@ -53,7 +55,7 @@ fy = st.sidebar.selectbox(
 engine = TaxEngine(fy)
 page = st.sidebar.radio(
     "View",
-    ["Sell planner", "Overview", "Holdings", "Cashflow", "Tax", "Analysis"],
+    ["Alerts", "Sell planner", "Overview", "Holdings", "Cashflow", "Tax", "Analysis"],
 )
 
 # `or` would be wrong here: days_stale of 0 is the freshest possible value, not
@@ -524,5 +526,108 @@ def render_cashflow():
         st.info(n)
 
 
-{"Sell planner": render_planner, "Overview": render_overview, "Holdings": render_holdings,
- "Cashflow": render_cashflow, "Tax": render_tax, "Analysis": render_analysis}[page]()
+SEVERITY_ICON = {"high": "🔴", "medium": "🟠", "info": "🔵"}
+
+
+def render_alerts():
+    st.title("Alerts")
+    st.caption(
+        "Your own exit rules, evaluated against today's positions. Every alert records the "
+        "facts that fired it — nothing here places an order."
+    )
+
+    rules_engine = RulesEngine(conn, tax_engine=engine)
+    for w in rules_engine.warnings:
+        st.error(w)
+
+    c1, c2, c3 = st.columns([1, 1, 3])
+    if c1.button("Run rules now", type="primary"):
+        result = rules_engine.run(as_of)
+        st.session_state["last_run"] = (
+            f"{len(result.fired)} new alert(s); {result.already_open} already open, "
+            f"{result.suppressed_cooldown} suppressed by cooldown."
+        )
+        st.rerun()
+    show_all = c2.checkbox("Include closed")
+    if msg := st.session_state.get("last_run"):
+        c3.success(msg)
+
+    alerts = rules_engine.open_alerts(include_muted=show_all)
+    if not alerts:
+        st.info("No open alerts. Run the rules to check against today's prices.")
+    else:
+        counts = {s: sum(1 for a in alerts if a.severity == s) for s in ("high", "medium", "info")}
+        m = st.columns(3)
+        for col, (sev, n) in zip(m, counts.items()):
+            col.metric(f"{SEVERITY_ICON[sev]} {sev.title()}", n)
+
+    for a in alerts:
+        with st.container(border=True):
+            top, actions = st.columns([5, 2])
+            top.markdown(
+                f"{SEVERITY_ICON.get(a.severity, '•')} **{a.subject}** — {a.message}  \n"
+                f"<span style='opacity:.6;font-size:0.85em'>{a.rule_name} · fired "
+                f"{a.fired_on} · {a.status}</span>",
+                unsafe_allow_html=True,
+            )
+            b = actions.columns(3)
+            for label, status in (("Ack", "ACKED"), ("Acted", "ACTED"), ("Mute", "MUTED")):
+                if b[("Ack", "Acted", "Mute").index(label)].button(
+                    label, key=f"{status}-{a.id}", disabled=a.status == status
+                ):
+                    rules_engine.set_status(a.id, status)
+                    st.rerun()
+            facts = {k: v for k, v in a.context.items() if not k.startswith("__")}
+            if facts:
+                with st.expander("Why this fired"):
+                    st.write(facts)
+                    st.code(a.context.get("__condition__", ""), language="python")
+
+    st.divider()
+    with st.expander("Configured rules"):
+        st.caption(
+            "Edit `fpa/rules/rules.yaml` to change these. Prefer few, simple, explainable "
+            "rules — an alert list you stop reading is worse than no alerts."
+        )
+        st.dataframe(pd.DataFrame(describe(rules_engine.rules)), hide_index=True,
+                     use_container_width=True)
+
+    with st.expander("Does a rule actually work? (backtest)"):
+        st.caption(
+            "Replays a rule over your real history and compares what happened next against "
+            "the base rate — the median forward return across every tested date. A rule earns "
+            "its place by beating that, not by being right in a falling market."
+        )
+        names = [r.name for r in rules_engine.rules]
+        pick = st.selectbox("Rule", names, key="bt-rule")
+        step = st.slider("Evaluate every N days", 1, 30, 7)
+        if st.button("Run backtest"):
+            rule = next(r for r in rules_engine.rules if r.name == pick)
+            with st.spinner("Replaying history…"):
+                res = Backtester(conn, engine).run(rule, end=as_of, step_days=step)
+            st.markdown(f"**{res.verdict(90)}**")
+            if res.base_rate:
+                st.dataframe(pd.DataFrame([{
+                    "Horizon": f"{h}d",
+                    "After firing %": round(res.median_forward(h), 2)
+                    if res.median_forward(h) is not None else None,
+                    "Base rate %": round(res.base_rate[h], 2)
+                    if res.base_rate[h] is not None else None,
+                    "Edge (pp)": round(res.edge(h), 2) if res.edge(h) is not None else None,
+                    "Fell afterwards %": round(res.hit_rate(h), 0)
+                    if res.hit_rate(h) is not None else None,
+                } for h in res.base_rate]), hide_index=True, use_container_width=True)
+            if res.firings:
+                st.dataframe(pd.DataFrame([{
+                    "Date": f.date, "Instrument": f.subject,
+                    "90d after %": round(f.forward.get(90), 1)
+                    if f.forward.get(90) is not None else None,
+                    "Because": f.context,
+                } for f in res.firings[:50]]), hide_index=True, use_container_width=True)
+            for n in res.notes:
+                st.info(n)
+
+
+{"Alerts": render_alerts, "Sell planner": render_planner, "Overview": render_overview,
+ "Holdings": render_holdings, "Cashflow": render_cashflow, "Tax": render_tax,
+ "Analysis": render_analysis}[page]()

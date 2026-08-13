@@ -16,6 +16,7 @@ pip install -r requirements.txt
 python -m fpa.cli sample     # generate a sample portfolio to explore
 python -m fpa.cli import-cas statement.pdf --password ABCDE1234F --dry-run
 python -m fpa.cli import-tradebook trades.csv
+python -m fpa.cli rules check    # what needs your attention
 python -m fpa.cli plan       # print this FY's zero-tax sell plan
 python -m fpa.cli plan --economics --mode HARVEST   # ...and what it costs
 streamlit run app.py         # dashboard
@@ -114,6 +115,69 @@ sheltered nothing.
 Costs are broker- and scheme-specific — check [`fpa/planner/costs.yaml`](fpa/planner/costs.yaml)
 against your actual brokerage and exit loads before trusting the net numbers.
 
+## Rules and alerts
+
+```bash
+python -m fpa.cli rules check --why      # evaluate against today's positions
+python -m fpa.cli rules fields           # what you can write rules about
+python -m fpa.cli rules backtest stop_loss
+python -m fpa.cli alerts 12 --status acted
+```
+
+Rules live in [`fpa/rules/rules.yaml`](fpa/rules/rules.yaml) and are yours to edit:
+
+```yaml
+- name: trailing_stop
+  scope: {kind: EQUITY, min_priority: 60}
+  when: "drawdown_from_peak <= -25"
+  severity: high
+  cooldown_days: 45
+  message: "{name} is {drawdown_from_peak:.1f}% off its peak since you bought."
+```
+
+**Conditions are not `eval()`.** A rules file is configuration — it gets copied between machines and
+pasted from notes — so expressions are parsed to an AST and walked against a whitelist. Attribute
+access, subscripting, lambdas, comprehensions and imports are rejected at load time. Twelve
+sandbox-escape attempts are in the test suite.
+
+**Missing data means "don't fire", not a crash.** A fund with three weeks of NAV history has no
+200-day average, so `sma200` is `None` rather than `0` — otherwise every "price above its 200 DMA"
+rule would fire on it.
+
+**Two things keep the list readable.** An alert you have stopped reading is worse than no alert, so
+a rule won't re-fire while an alert for the same subject is still open, and `cooldown_days` stops a
+persistent condition (a breached stop-loss stays breached) reappearing daily.
+
+**Every alert stores the facts that fired it.** Three months on, "why did this fire?" is the question
+you actually have, and a rule name doesn't answer it — so the JSON snapshot keeps the fields the
+condition referenced.
+
+### Does a rule actually work?
+
+```
+  Backtest — stop_loss
+  Condition: unrealised_pct <= -20
+  2023-08-14 to 2026-08-13, every 7 days, 1,884 evaluations
+
+    Horizon     After firing   Base rate      Edge
+    30d                -0.1%        0.8%     -0.9%
+    90d                -0.8%        2.2%     -3.0%
+    180d               -1.3%        6.6%     -7.9%
+
+  Useful: 142 firings, and the position did 3.0pp worse than the base rate
+  over the next 90 days.
+```
+
+**The base rate is the point.** "The position fell 3% after this fired" sounds like a working signal
+until you notice the market fell 5% over *every* window that period. So results are always shown
+against the median forward return across all tested dates, fired or not. A rule earns its place by
+beating that.
+
+The verdict refuses to conclude from small samples, and says so: one portfolio over a few years is
+an anecdote, not a sample. Indicators are computed over the full series then sliced by date — SMA,
+RSI and MACD are causal, so there's no lookahead — and positions are reconstructed as they actually
+stood on each historical date by replaying transactions.
+
 ## Importing your real data
 
 ```bash
@@ -167,9 +231,9 @@ treating them separately is how people sell to fund something their SIP was alre
 ## What it does and doesn't do
 
 **Does:** FIFO tax lots with correct STCG/LTCG split · zero-tax sell planning · opportunity-cost
-and breakeven analysis · "wait N days" deferral advice · CAS and tradebook import with
-reconciliation · step-up SIP planning · XIRR on real cashflows · equity technicals · FY tax summary
-with carry-forward.
+and breakeven analysis · "wait N days" deferral advice · a rules engine with alerts and backtesting
+· CAS and tradebook import with reconciliation · step-up SIP planning · XIRR on real cashflows ·
+equity technicals · FY tax summary with carry-forward.
 
 **Doesn't:** place orders (it never transacts), predict prices, handle F&O, or need an API key.
 
@@ -212,6 +276,12 @@ fpa/
 │   ├── opportunity.py     what the tax saving costs
 │   └── costs.yaml         ← check against your broker
 │   └── cashflow.py    step-up SIP schedule, FY inflow
+├── rules/
+│   ├── evaluator.py   AST whitelist — never eval()
+│   ├── context.py     every field a rule can name
+│   ├── engine.py      scoping, cooldowns, alert lifecycle
+│   ├── backtest.py    replay vs base rate
+│   └── rules.yaml     ← you edit this
 ├── analysis/        technicals (equity only), XIRR/drawdown
 ├── ingest/          AMFI, yfinance, CAS PDF, broker tradebook
 └── cli.py
@@ -228,7 +298,7 @@ get XIRR, rolling returns and overlap instead.
 ## Tests
 
 ```bash
-python -m pytest tests/ -q     # 136 tests
+python -m pytest tests/ -q     # 210 tests
 ```
 
 The load-bearing invariant — every plan produces exactly zero tax — is tested directly, alongside
@@ -239,6 +309,6 @@ stale rates is worse than no suite.
 ## Status
 
 Built: tax engine, FIFO lots, sell planner, opportunity-cost analysis, CAS PDF and tradebook
-import, step-up SIP planning, AMFI + yfinance ingest, dashboard, sample data. Plans a 10,000-lot
-ledger in ~1.3s.
-Not yet: fundamentals ingest, standing rules engine with alerts, rebalancing, backtest mode. See [DESIGN.md](DESIGN.md) §13 for phasing.
+import, step-up SIP planning, rules engine with alerts and backtesting, AMFI + yfinance ingest,
+dashboard, sample data. Plans a 10,000-lot ledger in ~1.3s.
+Not yet: fundamentals ingest, rebalancing, a scheduled daily job. See [DESIGN.md](DESIGN.md) §13 for phasing.

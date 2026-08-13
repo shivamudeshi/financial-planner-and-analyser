@@ -1,0 +1,101 @@
+# Your exit rules. Edit freely — this file is the point.
+#
+# Each rule raises an alert; nothing here ever places an order.
+#
+# Fields available in `when` and `message`: run `fpa rules fields`.
+# Check a rule's history before trusting it:  fpa rules backtest <name>
+#
+# Guidance from having built this: prefer FEW, SIMPLE, EXPLAINABLE rules. A rule
+# you can restate in one sentence is one you will actually act on. A dozen tuned
+# indicator rules will fire constantly, you will start ignoring the list, and an
+# alert list you ignore is worse than no alerts at all.
+#
+# `cooldown_days` stops a persistent condition re-firing daily. Set it to roughly
+# how often you would want reminding about that condition.
+
+# ---------------------------------------------------------------- risk
+
+- name: stop_loss
+  scope: {kind: EQUITY}
+  when: "unrealised_pct <= -20"
+  severity: high
+  cooldown_days: 45
+  message: "{name} is {unrealised_pct:.1f}% below cost. Re-read your original thesis — is it still true?"
+  note: >
+    Deliberately not a sell instruction. A price fall is a prompt to re-check
+    the reasoning, not evidence the reasoning was wrong.
+
+- name: trailing_stop
+  scope: {kind: EQUITY, min_priority: 60}
+  when: "drawdown_from_peak <= -25"
+  severity: high
+  cooldown_days: 45
+  message: "{name} is {drawdown_from_peak:.1f}% off its peak since you bought, and you have it at exit priority {exit_priority}."
+
+- name: concentration_risk
+  when: "weight_pct > 15"
+  severity: medium
+  cooldown_days: 90
+  message: "{name} is {weight_pct:.1f}% of the portfolio. One position, one thesis, one outcome."
+
+- name: allocation_drift
+  scope: {level: portfolio}
+  when: "abs(drift_pct) >= 7"
+  severity: medium
+  cooldown_days: 60
+  message: "{asset_class} is {actual_pct:.1f}% against a {target_pct:.0f}% target ({drift_pct:+.1f} points). Redirect new money before selling."
+
+# ---------------------------------------------------------------- tax
+
+- name: ltcg_threshold_approaching
+  when: "0 < days_to_long_term <= 45 and unrealised_pct > 0"
+  severity: info
+  cooldown_days: 60
+  message: "{name} turns fully long-term in {days_to_long_term} days. Selling before then is taxed at 20% instead of 12.5%."
+
+- name: harvest_candidate
+  when: "all_long_term and long_term_gain > 25000"
+  severity: info
+  cooldown_days: 180
+  message: "{name} holds {long_term_gain:,.0f} of long-term gain. Check the harvest planner before 31 March — the exemption does not carry forward."
+
+- name: loss_harvest_candidate
+  when: "unrealised_pct <= -12 and all_long_term"
+  severity: info
+  cooldown_days: 180
+  message: "{name} is {unrealised_pct:.1f}% down. Worth booking only if you have gains this year to set it off against — see the opportunity-cost view."
+
+# ---------------------------------------------------------------- momentum
+
+- name: broke_200dma
+  scope: {kind: EQUITY}
+  when: "has_price_history and above_200dma == False and trend == 'Downtrend'"
+  severity: medium
+  cooldown_days: 60
+  message: "{name} is below its 200-day average at {close:,.0f} and the 50 DMA is under the 200. Trend has turned."
+
+- name: overbought_and_extended
+  scope: {kind: EQUITY, min_priority: 50}
+  when: "rsi14 > 75 and unrealised_pct > 50"
+  severity: info
+  cooldown_days: 45
+  message: "{name}: RSI {rsi14:.0f} on a {unrealised_pct:.0f}% gain. If you were going to trim, this is the kind of moment people wish they had."
+
+# ---------------------------------------------------------------- funds
+
+- name: fund_underperforming
+  scope: {kind: MF, asset_class: EQUITY}
+  when: "xirr_pct < 8 and days_held > 1095"
+  severity: medium
+  cooldown_days: 180
+  message: "{name} has returned {xirr_pct:.1f}% XIRR over {days_held} days. Compare against its benchmark before switching — three bad years can precede five good ones."
+  note: >
+    XIRR, not the factsheet's point-to-point number, because with a SIP running
+    they are different things and only one of them is your return.
+
+- name: debt_fund_short_term
+  scope: {kind: MF, asset_class: DEBT}
+  when: "unrealised > 0 and days_held < 1095"
+  severity: info
+  cooldown_days: 365
+  message: "{name} is a debt fund bought after April 2023, so gains are taxed at your slab rate regardless of holding period. No long-term benefit to wait for."

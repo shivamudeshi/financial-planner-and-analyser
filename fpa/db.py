@@ -112,6 +112,22 @@ CREATE TABLE IF NOT EXISTS plan_targets (
     PRIMARY KEY (fy, asset_class)
 );
 
+-- Rule firings. `context` is a JSON snapshot of the fields that triggered the
+-- rule, so an alert stays explainable long after the prices that caused it moved.
+CREATE TABLE IF NOT EXISTS alerts (
+    id            INTEGER PRIMARY KEY,
+    rule_name     TEXT    NOT NULL,
+    instrument_id INTEGER REFERENCES instruments(id) ON DELETE CASCADE,
+    fired_on      TEXT    NOT NULL,
+    severity      TEXT    NOT NULL DEFAULT 'medium',
+    message       TEXT    NOT NULL,
+    context       TEXT,
+    status        TEXT    NOT NULL DEFAULT 'NEW'
+                  CHECK (status IN ('NEW','ACKED','ACTED','MUTED'))
+);
+CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts(status, fired_on);
+CREATE INDEX IF NOT EXISTS idx_alerts_rule ON alerts(rule_name, fired_on);
+
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 """
 

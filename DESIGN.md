@@ -1,0 +1,428 @@
+# Financial Planner & Analyser — Design
+
+A local-first tool to plan, track, and analyse a personal portfolio of **Indian mutual funds and
+listed equities**. Single user. No F&O, no intraday, no external hosting.
+
+---
+
+## 1. Goals and non-goals
+
+### Goals
+
+1. **Plan** — set yearly targets (investable surplus, asset allocation, SIP schedule) and see actual
+   vs. plan as the year progresses.
+2. **Track** — one combined view of MF and equity holdings with correct cost basis, realised and
+   unrealised P&L, and XIRR.
+3. **Decide when to sell** — a rules engine that evaluates *your* explicit exit criteria daily and
+   raises alerts. Rules you wrote, not signals from a black box.
+4. **Analyse** — technicals and fundamentals on the equity side, rolling-return and
+   attribution metrics on the MF side.
+
+### Non-goals
+
+- Order placement. This tool never transacts. It tells you; you act in your broker app.
+- Real-time / tick data. End-of-day is sufficient for a yearly planning horizon.
+- Multi-user, auth, cloud hosting.
+- F&O, commodities, crypto, bonds. (Debt MFs are in scope only as an asset-allocation bucket.)
+- Prediction. No price forecasting, no ML on returns.
+
+### Design principles
+
+- **No API key required to be useful.** Every phase-1 data source is free and keyless. Broker APIs
+  are an optional later enhancement, not a foundation.
+- **Local-first.** One SQLite file. Data never leaves the machine.
+- **Reproducible.** All derived numbers recomputable from raw transactions + price history.
+- **Boring tech.** Python, SQLite, Streamlit. Nothing to operate.
+
+---
+
+## 2. Architecture
+
+```
+                  ┌──────────────────────────────────────────┐
+   free, keyless  │  AMFI NAVAll.txt      (MF NAV, daily)     │
+   data sources   │  yfinance             (equity OHLCV)      │
+                  │  NSE/BSE XBRL         (fundamentals)      │
+                  └────────────────┬─────────────────────────┘
+                                   │
+   your data      ┌────────────────▼─────────────────────────┐
+   (manual/file)  │  CAMS/KFintech CAS PDF  → MF txns         │
+                  │  Broker tradebook CSV   → equity txns     │
+                  └────────────────┬─────────────────────────┘
+                                   │
+                           ┌───────▼────────┐
+                           │  ingest layer  │  normalise, dedupe, upsert
+                           └───────┬────────┘
+                                   │
+                           ┌───────▼────────┐
+                           │  portfolio.db  │  SQLite — single source of truth
+                           └───────┬────────┘
+                                   │
+              ┌────────────────────┼────────────────────┐
+              │                    │                    │
+      ┌───────▼──────┐    ┌────────▼───────┐   ┌────────▼───────┐
+      │  analysis    │    │  rules engine  │   │    planner     │
+      │  technicals  │    │  → alerts      │   │  targets, SIP  │
+      │  MF metrics  │    │                │   │  rebalancing   │
+      │  fundamentals│    │                │   │                │
+      └───────┬──────┘    └────────┬───────┘   └────────┬───────┘
+              └────────────────────┼────────────────────┘
+                                   │
+                    ┌──────────────▼──────────────┐
+                    │  app.py — Streamlit         │
+                    │  daily_job.py — cron/GH     │
+                    └─────────────────────────────┘
+```
+
+### Repo layout
+
+```
+financial-planner-and-analyser/
+├── fpa/
+│   ├── ingest/
+│   │   ├── amfi.py           # daily + historical NAV
+│   │   ├── equity_prices.py  # yfinance OHLCV, corporate actions
+│   │   ├── cas.py            # CAMS/KFintech CAS PDF parser
+│   │   ├── tradebook.py      # broker CSV → transactions
+│   │   └── fundamentals.py   # XBRL / yfinance financials
+│   ├── db/
+│   │   ├── schema.sql
+│   │   └── migrations/
+│   ├── analysis/
+│   │   ├── technicals.py     # equity only
+│   │   ├── mf_metrics.py     # rolling returns, alpha, overlap
+│   │   ├── fundamentals.py   # ratio computation, trend flags
+│   │   └── returns.py        # XIRR, TWRR, drawdown
+│   ├── rules/
+│   │   ├── engine.py
+│   │   └── rules.yaml        # ← you edit this
+│   ├── planner/
+│   │   ├── targets.py
+│   │   └── rebalance.py
+│   ├── tax/
+│   │   ├── lots.py           # FIFO lot matching
+│   │   └── rates.yaml        # ← verify each Budget
+│   └── config.yaml
+├── app.py                    # streamlit run app.py
+├── daily_job.py              # refresh prices, evaluate rules, notify
+└── data/portfolio.db         # gitignored
+```
+
+---
+
+## 3. Data sources
+
+| Need | Source | Key | Notes |
+|---|---|---|---|
+| MF NAV, all schemes, daily | `amfiindia.com/spages/NAVAll.txt` | No | Plain text, ~12k schemes, updated ~11pm IST on business days |
+| MF NAV history | `api.mfapi.in/mf/{code}` | No | Unofficial AMFI mirror. Convenient; treat as best-effort and cache locally |
+| Equity OHLCV + splits/bonus | `yfinance`, symbols as `RELIANCE.NS` / `500325.BO` | No | Adjusted close handles corporate actions. Unofficial API — pin the version |
+| Index / benchmark levels | yfinance `^NSEI`, `^NSEBANK`, `^CRSLDX` | No | Needed for alpha/beta and relative strength |
+| MF holdings & transactions | CAMS/KFintech **CAS** PDF | No | Request from camsonline/kfintech, password-protected, monthly. Authoritative for units and cost |
+| Equity holdings & transactions | Broker tradebook CSV export | No | Zerodha/Groww/Upstox all export. Authoritative for cost basis |
+| Fundamentals | yfinance `.financials` / `.balance_sheet` | No | Coverage for Indian names is patchy but workable |
+| Fundamentals, deeper | NSE/BSE quarterly XBRL filings | No | Free and authoritative, but messy parsing. Phase 3 |
+| Live quotes, auto-sync holdings | Angel One SmartAPI / Dhan / Upstox | **Yes** | Free tiers exist; Zerodha Kite Connect is paid. Optional, phase 4 |
+
+**On scraping Screener.in / Trendlyne:** they have the cleanest Indian fundamentals but no public API,
+and scraping them is against their terms. Not designed in. If the XBRL route proves too painful, the
+honest fallback is manual entry of a dozen ratios per stock per quarter — for a portfolio of 15–30
+names that is perhaps 20 minutes a quarter.
+
+**Reliability stance:** every external source is treated as untrusted and cached. Ingest is
+idempotent and never destructive — a failed fetch leaves yesterday's data intact and logs a
+staleness warning that the dashboard surfaces.
+
+---
+
+## 4. Data model
+
+SQLite. Money as `INTEGER` paise, not floats. Dates as `TEXT` ISO-8601.
+
+```sql
+-- What can be held
+instruments (
+  id            INTEGER PRIMARY KEY,
+  kind          TEXT NOT NULL,     -- 'EQUITY' | 'MF'
+  name          TEXT NOT NULL,
+  isin          TEXT UNIQUE,
+  symbol        TEXT,              -- 'RELIANCE' (equity)
+  exchange      TEXT,              -- 'NSE' | 'BSE'
+  amfi_code     TEXT,              -- scheme code (MF)
+  category      TEXT,              -- 'LARGE_CAP' | 'FLEXI_CAP' | 'DEBT' | ...
+  asset_class   TEXT NOT NULL,     -- 'EQUITY' | 'DEBT' | 'HYBRID' | 'GOLD'
+  benchmark_id  INTEGER REFERENCES instruments(id),
+  tags          TEXT,              -- JSON array, drives rule scoping
+  active        INTEGER DEFAULT 1
+);
+
+-- Unified price/NAV series
+prices (
+  instrument_id INTEGER NOT NULL REFERENCES instruments(id),
+  date          TEXT NOT NULL,
+  open, high, low, close, adj_close  INTEGER,   -- paise; MF uses close only
+  volume        INTEGER,
+  source        TEXT NOT NULL,
+  PRIMARY KEY (instrument_id, date)
+);
+
+-- Raw truth. Everything else derives from this.
+transactions (
+  id            INTEGER PRIMARY KEY,
+  instrument_id INTEGER NOT NULL REFERENCES instruments(id),
+  date          TEXT NOT NULL,
+  kind          TEXT NOT NULL,     -- BUY|SELL|SIP|DIVIDEND|BONUS|SPLIT|SWITCH_IN|SWITCH_OUT
+  quantity      REAL NOT NULL,     -- MF units are fractional
+  price         INTEGER,           -- paise per unit
+  amount        INTEGER NOT NULL,  -- paise, signed
+  charges       INTEGER DEFAULT 0, -- brokerage + STT + stamp + GST
+  account       TEXT,              -- folio no. or broker
+  external_id   TEXT UNIQUE,       -- dedupe key from CAS/tradebook
+  note          TEXT
+);
+
+-- FIFO tax lots, rebuilt from transactions
+lots (
+  id            INTEGER PRIMARY KEY,
+  instrument_id INTEGER NOT NULL REFERENCES instruments(id),
+  buy_date      TEXT NOT NULL,
+  quantity      REAL NOT NULL,
+  remaining_qty REAL NOT NULL,
+  cost_per_unit INTEGER NOT NULL,
+  grandfathered_cost INTEGER       -- s.112A, for pre-2018-01-31 buys
+);
+
+disposals (                        -- realised gains, one row per lot consumed
+  id, lot_id, sell_txn_id, quantity, sale_value, cost, gain, term  -- 'STCG'|'LTCG'
+);
+
+fundamentals (
+  instrument_id, period_end, period_type,  -- 'Q'|'A'
+  metric TEXT, value REAL, source TEXT,
+  PRIMARY KEY (instrument_id, period_end, period_type, metric)
+);
+
+-- Planning
+plan_targets (year, asset_class, target_pct, target_amount, note);
+plan_cashflows (year, month, expected_surplus, actual_invested);
+
+-- Rules & alerts
+alerts (
+  id, rule_name, instrument_id, fired_on, severity,
+  message, context TEXT,           -- JSON snapshot of why it fired
+  status TEXT                      -- 'NEW'|'ACKED'|'ACTED'|'MUTED'
+);
+```
+
+**Why lots matter:** Indian tax requires FIFO matching for listed equity, and the STCG/LTCG split
+drives real money. Deriving lots properly from day one avoids a painful retrofit.
+
+---
+
+## 5. Analysis layer
+
+### 5.1 Equity — technicals
+
+Trend: SMA/EMA 20 / 50 / 200, price vs. 200DMA, golden/death cross state.
+Momentum: RSI(14), MACD(12,26,9), rate of change 1m/3m/6m/12m.
+Volatility: ATR(14), Bollinger(20,2), realised vol.
+Position: distance from 52-week high/low, drawdown from peak.
+Relative: relative strength vs. Nifty 50 and vs. sector index.
+Volume: 20-day average, volume spike flag, OBV.
+
+These feed the rules engine as *inputs*. They are not, on their own, buy/sell signals.
+
+### 5.2 Equity — fundamentals
+
+Per quarter and per year, with 3–8 quarter trend direction:
+
+- Growth: revenue, EBITDA, PAT, YoY and QoQ
+- Profitability: gross/EBITDA/net margin, ROE, ROCE
+- Balance sheet: debt/equity, interest coverage, current ratio
+- Cash: CFO, CFO/PAT (an accrual-quality check that catches a lot)
+- Valuation: P/E, P/B, EV/EBITDA, and each vs. its own 3/5-year median — the *relative* reading is
+  what matters, absolute P/E across sectors is noise
+- Governance: promoter holding trend, promoter pledge %
+
+### 5.3 Mutual funds — deliberately different
+
+**No technical analysis on NAV.** A NAV series has no volume, no order flow, and no counterparty —
+RSI or MACD on it is a category error. MF analysis is:
+
+- **XIRR** — the only correct return metric when you're running SIPs. Headline "3-year return" on a
+  fund factsheet is not your return.
+- **Rolling returns** — 1/3/5-year returns computed over every rolling window, not point-to-point.
+  Point-to-point return is an artifact of its start date.
+- Risk: max drawdown, recovery time, standard deviation, Sharpe, Sortino
+- Vs. benchmark: alpha, beta, up/down capture, and rolling excess return
+- **Portfolio overlap** — pairwise common-holding % between your funds. The single most common
+  problem in a retail MF portfolio is six funds that are quietly the same fund.
+- Expense ratio drag, compounded over your actual holding period
+- Category and AMC concentration
+
+---
+
+## 6. Rules engine — the "when to sell" part
+
+Declarative YAML, evaluated every evening after prices refresh. Each rule produces alerts, never
+orders.
+
+```yaml
+- name: stop_loss
+  scope: {kind: EQUITY}
+  when: "unrealised_pct <= -15"
+  severity: high
+  cooldown_days: 30
+  message: "{symbol} down {unrealised_pct:.1f}% from cost — review thesis"
+
+- name: trailing_stop
+  scope: {kind: EQUITY, tags: [momentum]}
+  when: "close <= peak_since_buy * 0.80"
+  severity: high
+
+- name: ltcg_threshold_approaching
+  scope: {kind: [EQUITY, MF]}
+  when: "330 <= days_held <= 365 and unrealised_pct > 0"
+  severity: info
+  message: "{name} turns long-term on {ltcg_date} — {days_to_ltcg}d away"
+
+- name: allocation_drift
+  scope: {level: portfolio}
+  when: "abs(actual_pct - target_pct) >= 5"
+  severity: medium
+
+- name: concentration_risk
+  scope: {kind: EQUITY}
+  when: "position_pct_of_portfolio > 15"
+  severity: medium
+
+- name: valuation_stretched
+  scope: {kind: EQUITY}
+  when: "pe > pe_median_5y * 1.5 and unrealised_pct > 40"
+  severity: medium
+
+- name: fundamental_deterioration
+  scope: {kind: EQUITY}
+  when: "debt_to_equity_trend_4q == 'RISING' and roce_trend_4q == 'FALLING'"
+  severity: high
+
+- name: mf_persistent_underperformance
+  scope: {kind: MF, asset_class: EQUITY}
+  when: "rolling_3y_alpha < 0 and quarters_of_negative_alpha >= 6"
+  severity: medium
+  message: "{name}: 6+ quarters trailing {benchmark}. Switch candidate."
+
+- name: fund_overlap
+  scope: {kind: MF}
+  when: "max_pairwise_overlap > 60"
+  severity: info
+```
+
+**Engine mechanics**
+
+- Each rule is evaluated against a **context dict** per instrument — every metric from §5 plus
+  position facts (`days_held`, `unrealised_pct`, `position_pct_of_portfolio`, `peak_since_buy`).
+- `when` is a restricted expression evaluated over that dict — an AST-walking evaluator with a
+  whitelist of node types, not `eval()`.
+- `cooldown_days` stops a rule re-firing daily while a condition persists.
+- Every alert stores a **JSON snapshot of the context that triggered it**, so three months later you
+  can see exactly why it fired.
+- Alerts have a lifecycle: `NEW → ACKED → ACTED | MUTED`. Acting on an alert and recording the
+  outcome is what eventually lets you ask "are my sell rules any good?"
+
+**Backtest mode.** Replay any rule over history to see when it would have fired and what happened
+next. This is the difference between rules you trust and rules you invented on a Tuesday. Worth
+building before you rely on any rule with real money.
+
+---
+
+## 7. Planner
+
+- **Yearly targets** — investable surplus, target allocation by asset class, per-goal earmarking.
+- **SIP schedule** — expected monthly outflow, tracked against actual. Flags missed SIPs.
+- **Progress** — actual vs. plan, by month, cumulative.
+- **Rebalancing** — given drift, compute the minimum set of trades to return to target, preferring
+  (a) redirecting *new* money over selling, and (b) selling long-term lots over short-term ones.
+  Shows the tax cost of each proposed trade before you act.
+
+---
+
+## 8. Tax
+
+`tax/rates.yaml`, versioned by financial year. Current assumptions for FY 2025-26 on listed equity
+and equity-oriented MFs:
+
+- Holding period for long-term: **12 months**
+- STCG: **20%**
+- LTCG: **12.5%** above a **₹1.25 lakh** annual exemption
+- Debt MFs purchased on/after 2023-04-01: taxed at slab, no indexation
+- s.112A grandfathering for equity acquired before 2018-01-31:
+  `cost = max(actual_cost, min(FMV_2018_01_31, sale_price))`
+
+**Verify these against the current Finance Act before relying on them.** Rates moved in July 2024
+and can move at any Budget. The design isolates them in one YAML file precisely so this is a
+one-line correction, and the dashboard shows which FY's rates it used for every number.
+
+Outputs: realised gains by term for the FY, tax liability estimate, unrealised gains split by
+short/long, tax-loss-harvesting candidates, and a "days until long-term" list.
+
+---
+
+## 9. Dashboard
+
+Streamlit, one command, opens locally.
+
+| Page | Contents |
+|---|---|
+| **Overview** | Net worth, allocation donut vs. target, XIRR, today's movers, open alerts |
+| **Alerts** | Ranked by severity, with the triggering context, ack/act/mute |
+| **Planner** | Year targets, SIP tracker, actual vs. plan, rebalance proposals |
+| **Equities** | Holdings table; per-stock drill-down with price chart + indicators + fundamentals trend |
+| **Funds** | Holdings, XIRR per fund, rolling returns, overlap matrix, alpha vs. benchmark |
+| **Tax** | FY realised gains, liability estimate, harvesting candidates, LTCG countdown |
+| **Transactions** | Full ledger, import status, data-staleness warnings |
+
+### Scheduling
+
+`daily_job.py` runs after market close: refresh prices → rebuild lots → recompute metrics →
+evaluate rules → notify if anything fired. Local cron, or a GitHub Actions cron committing an
+encrypted DB if you want it running without your laptop on. Notification via email (SMTP) or
+ntfy.sh — keyless, no app to install.
+
+---
+
+## 10. Phasing
+
+| Phase | Scope | Outcome |
+|---|---|---|
+| **1** | Schema, AMFI + yfinance ingest, CSV/manual transactions, lots, Overview + Transactions pages | You can see your real portfolio and correct XIRR |
+| **2** | Rules engine, alerts, daily job, notifications, technicals | It tells you when something needs attention |
+| **3** | Fundamentals ingest, MF rolling/alpha/overlap, tax page, planner, rebalancing | Full analysis depth |
+| **4** | CAS PDF parser, backtest mode, optional broker API for live quotes | Convenience and confidence |
+
+Phases 1–3 need **no API key and no paid service**.
+
+---
+
+## 11. Risks and open questions
+
+**Risks**
+
+- *yfinance is unofficial* and breaks occasionally. Mitigation: pin the version, cache everything, keep
+  the ingest interface swappable so a broker API can slot in behind it later.
+- *Indian fundamentals data is the genuine weak spot.* No good free structured source. XBRL parsing is
+  real work; manual quarterly entry is the honest fallback.
+- *CAS PDF formats change* between CAMS and KFintech and over time. Parser will need occasional repair.
+  Manual entry is always available as a backstop.
+- *Rules that fit the past.* Backtest mode makes this visible rather than solving it. Prefer few,
+  simple, explainable rules over many tuned ones.
+- *Tax rules change.* Isolated in one file, stamped on every output.
+
+**Open questions for you**
+
+1. Roughly how many holdings — 10, 30, 100? Under ~50 the whole thing stays trivially fast and some
+   optimisation work disappears.
+2. Do you want goal-based earmarking (retirement / house / emergency), or one undifferentiated pool?
+3. Are there existing transaction records to import — broker tradebook CSVs, a CAS PDF, a spreadsheet —
+   or does the ledger start from scratch?
+4. Notifications: email, ntfy push, or just look at the dashboard?

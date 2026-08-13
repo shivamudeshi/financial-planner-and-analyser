@@ -1,0 +1,54 @@
+# Transaction costs and the assumptions behind the opportunity-cost analysis.
+#
+# ⚠ Broker- and scheme-specific. The defaults below are typical for a discount
+# broker on delivery equity and a direct-plan mutual fund, but CHECK YOURS —
+# brokerage in particular varies from zero to 0.5%, and exit load is set per
+# scheme. Wrong inputs here make the net-benefit numbers wrong in a way that
+# looks authoritative.
+#
+# Rates are fractions of turnover unless stated.
+
+equity:
+  brokerage_pct: 0.0        # discount brokers charge nothing on delivery
+  brokerage_cap: 20.00      # rupees per order, if a percentage applies
+  stt_buy_pct: 0.001        # 0.1% delivery, both legs
+  stt_sell_pct: 0.001
+  exchange_pct: 0.0000297   # NSE
+  sebi_pct: 0.000001        # ₹10 per crore
+  stamp_buy_pct: 0.00015    # 0.015%, buy side only
+  gst_pct: 0.18             # on brokerage + exchange + SEBI charges
+  dp_charge: 15.93          # rupees per scrip per sell day, incl. GST
+
+mutual_fund:
+  brokerage_pct: 0.0        # direct plans
+  stt_buy_pct: 0.0
+  stt_sell_pct: 0.00001     # 0.001% on redemption of equity-oriented schemes
+  exchange_pct: 0.0
+  sebi_pct: 0.0
+  stamp_buy_pct: 0.00005    # 0.005% on purchase
+  gst_pct: 0.18
+  dp_charge: 0.0
+  # Exit load is scheme-specific and is the largest cost here by far. Default
+  # assumes the common "1% if redeemed within 365 days" and zero after.
+  exit_load_pct: 0.01
+  exit_load_days: 365
+
+opportunity:
+  # Days out of the market when harvesting (sell then rebuy).
+  #
+  # Equity is 1, not 0, deliberately: selling from holdings and rebuying the
+  # same scrip the same session can be netted as an intraday trade by some
+  # brokers, in which case no delivery-based capital gain arises and the whole
+  # harvest achieves nothing. Rebuying the next trading day keeps the sale
+  # unambiguously a delivery sale.
+  gap_days_equity: 1
+  # MF redemption settles T+1 to T+3, and the repurchase gets a later NAV.
+  gap_days_mf: 2
+
+  # Horizon over which a stepped-up cost basis eventually pays off, and the
+  # rate used to discount that future saving back to today.
+  expected_holding_years: 5
+  discount_rate: 0.10
+
+  # Below this, a harvest is not worth the effort even if net-positive.
+  min_net_benefit: 500.00

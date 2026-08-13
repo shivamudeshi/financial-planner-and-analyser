@@ -316,7 +316,54 @@ rounding up would break the invariant. Every proposal is re-verified after quant
 - **Warnings** — losses held back because there is not enough gain to absorb them.
 - **Unused exemption**, with the reminder that it expires on 31 March.
 
-## 7. Rules engine — ongoing alerts
+### Performance
+
+The planner bisects per candidate lot, so a naive implementation is fine at 200 lots and unusable at
+10,000. Probing the smallest order worth placing *before* bisecting cuts a 10,000-lot plan from 30s
+to 1.3s: once the gain budget is spent, every remaining candidate would otherwise burn 48 iterations
+converging on a quantity that gets discarded as dust.
+
+---
+
+## 7. Opportunity cost — the counterweight  ✅ built
+
+A zero-tax plan optimises tax in isolation, and tax is not the objective. This module prices what
+the saving costs, so the tax tail stops wagging the investment dog.
+
+| Trade-off | Benefit | Cost |
+|---|---|---|
+| **Harvest** (sell + rebuy) | PV of `gain × 12.5%` saved at a future sale | Round-trip charges, exit load, 1–3 days out of market, **holding period resets** |
+| **Defer** (wait for long-term) | `gain × (20% − 12.5%)`, or the full 20% if it becomes exempt | Price risk over the wait |
+| **Sell anyway** | Exit a deteriorating position on its merits | The 12.5% you refused to pay |
+
+**The breakeven metric.** For deferrals the decision-useful number is the price fall that exactly
+cancels the tax saved, set against the position's realised volatility over that window. "Saves 0.9%
+of position value against a 6.0% one-sigma move over 28 days" tells you immediately that the tax is
+noise and the decision belongs on investment merits.
+
+**Two costs that are easy to miss**, flagged on every harvest:
+
+- Rebought units start a **fresh 12-month holding period**. If you may sell within a year,
+  harvesting moves that sale from 12.5% to 20%.
+- For equity, a same-session buy-back can be netted by the broker as an intraday trade — in which
+  case no delivery-based capital gain arises and the harvest achieves *nothing*. Rebuy the next
+  trading day.
+
+**Counterfactual discipline.** In HARVEST mode "tax avoided now" is excluded from net benefit: you
+rebuy, so the alternative is doing nothing, not selling out. Including it overstated the sample
+plan's benefit by 15×. In EXIT mode it is included but labelled an upper bound, since it assumes
+you would otherwise have sold every candidate position outright.
+
+**The caveat that undercuts everything:** harvesting only pays if realised gains exceed the
+exemption *in the year you finally sell*. Under it anyway, and the harvest sheltered nothing.
+
+Cost parameters live in `fpa/planner/costs.yaml` and are broker- and scheme-specific. Exit load
+dominates every other MF cost by orders of magnitude and is charged **per lot**, not per order — a
+three-year SIP redemption is mostly load-free.
+
+---
+
+## 8. Rules engine — ongoing alerts
 
 Declarative YAML, evaluated every evening after prices refresh. Each rule produces alerts, never
 orders.
@@ -390,7 +437,7 @@ building before you rely on any rule with real money.
 
 ---
 
-## 8. Yearly planner
+## 9. Yearly planner
 
 - **Yearly targets** — investable surplus, target allocation by asset class, per-goal earmarking.
 - **SIP schedule** — expected monthly outflow, tracked against actual. Flags missed SIPs.
@@ -401,7 +448,7 @@ building before you rely on any rule with real money.
 
 ---
 
-## 9. Tax
+## 10. Tax
 
 `tax/rates.yaml`, versioned by financial year. Current assumptions for FY 2025-26 on listed equity
 and equity-oriented MFs:
@@ -422,7 +469,7 @@ short/long, tax-loss-harvesting candidates, and a "days until long-term" list.
 
 ---
 
-## 10. Dashboard
+## 11. Dashboard
 
 Streamlit, one command, opens locally.
 
@@ -445,7 +492,7 @@ ntfy.sh — keyless, no app to install.
 
 ---
 
-## 11. Phasing
+## 12. Phasing
 
 | Phase | Scope | Outcome |
 |---|---|---|
@@ -458,7 +505,7 @@ Phases 1–3 need **no API key and no paid service**.
 
 ---
 
-## 12. Risks and open questions
+## 13. Risks and open questions
 
 **Risks**
 

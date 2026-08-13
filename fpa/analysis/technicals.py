@@ -126,6 +126,37 @@ def snapshot(conn: sqlite3.Connection, instrument_id: int, as_of: str | None = N
     )
 
 
+def realised_volatility(
+    conn: sqlite3.Connection, instrument_id: int, *, lookback: int = 252, as_of: str | None = None
+) -> float | None:
+    """Annualised standard deviation of daily log returns, in percent.
+
+    Used to size the price risk of *waiting* — the counterweight to any tax
+    saving. Backward-looking and therefore only a rough guide to the next few
+    weeks, but it is the honest order-of-magnitude check on whether a tax
+    saving is large or small next to the market noise you are accepting.
+    """
+    import numpy as np
+
+    s = price_frame(conn, instrument_id, as_of)["close"].astype(float).tail(lookback)
+    if len(s) < 20:
+        return None
+    returns = np.log(s / s.shift(1)).dropna()
+    if returns.empty or returns.std() == 0:
+        return None
+    return float(returns.std() * (252**0.5) * 100)
+
+
+def volatility_over(
+    conn: sqlite3.Connection, instrument_id: int, days: int, as_of: str | None = None
+) -> float | None:
+    """Annualised vol rescaled to a ``days``-long window (square-root of time)."""
+    annual = realised_volatility(conn, instrument_id, as_of=as_of)
+    if annual is None or days <= 0:
+        return None
+    return annual * (days / 365) ** 0.5
+
+
 def relative_strength(
     conn: sqlite3.Connection, instrument_id: int, benchmark_id: int, days: int = 252
 ) -> float | None:

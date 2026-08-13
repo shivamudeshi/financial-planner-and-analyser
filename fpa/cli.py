@@ -96,6 +96,9 @@ def cmd_plan(args) -> int:
         for d in deferrals[:10]:
             print(f"    {d['name'][:34]:<34} fully long-term in {d['days_to_long_term']:>3}d "
                   f"({d['long_term_date']}) — saves {fmt(d['tax_if_sold_now'])}")
+    if args.economics:
+        _print_economics(conn, plan, engine=planner.engine, as_of=as_of)
+
     for w in plan.warnings:
         print(f"\n  ⚠  {w}")
     print()
@@ -103,6 +106,41 @@ def cmd_plan(args) -> int:
         print(f"  · {n}")
     print()
     return 0
+
+
+def _print_economics(conn, plan, *, engine, as_of: str) -> None:
+    """What the tax saving actually costs — the counterweight to the plan."""
+    from .planner.opportunity import OpportunityAnalyser
+
+    r = OpportunityAnalyser(conn, engine).analyse(plan, as_of=as_of)
+
+    print(f"\n  Opportunity cost")
+    print(f"  {'─' * 76}")
+    print(f"    Tax avoided now              {fmt(r.tax_avoided_now):>14}")
+    if r.future_tax_saved_pv:
+        print(f"    Future tax saved (PV)        {fmt(r.future_tax_saved_pv):>14}")
+    print(f"    Transaction costs            {fmt(-r.transaction_costs):>14}")
+    print(f"    {'─' * 44}")
+    print(f"    Net benefit                  {fmt(r.net_benefit):>14}")
+
+    if r.harvests:
+        print(f"\n  Per harvest:")
+        for h in r.harvests:
+            print(f"    {h.name[:34]:<34} net {fmt(h.net_benefit):>11}")
+            print(f"      {h.verdict}")
+            if h.costs.breakdown():
+                items = ", ".join(f"{k} {fmt(v)}" for k, v in h.costs.breakdown().items())
+                print(f"      Costs: {items}")
+
+    if r.deferrals:
+        print(f"\n  Is waiting worth it?")
+        for d in r.deferrals:
+            print(f"    {d.name[:34]:<34} saves {fmt(d.tax_saved):>10} "
+                  f"({d.breakeven_decline_pct:.1f}% of position)")
+            print(f"      {d.verdict}")
+
+    for n in r.notes:
+        print(f"\n    · {n}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -126,6 +164,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--mode", choices=[m.value for m in Mode], default=Mode.EXIT.value)
     s.add_argument("--min-priority", type=int, default=0)
     s.add_argument("--lots", action="store_true", help="show lot-level detail under each order")
+    s.add_argument("--economics", action="store_true",
+                   help="show what the tax saving costs: charges, gap risk, breakeven moves")
     s.add_argument("--fy", default=None)
     s.add_argument("--as-of", default=None)
     s.set_defaults(func=cmd_plan)

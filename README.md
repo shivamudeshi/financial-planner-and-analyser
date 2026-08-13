@@ -15,6 +15,7 @@ pip install -r requirements.txt
 
 python -m fpa.cli sample     # generate a sample portfolio to explore
 python -m fpa.cli plan       # print this FY's zero-tax sell plan
+python -m fpa.cli plan --economics --mode HARVEST   # ...and what it costs
 streamlit run app.py         # dashboard
 ```
 
@@ -65,10 +66,57 @@ books losses before selecting gains, capped at what the available gains can abso
 Set an **exit priority** (0–100) per holding on the Holdings page to tell the planner what you
 actually want out of.
 
+## Opportunity cost — the counterweight
+
+A zero-tax plan optimises tax in isolation, and tax is not the objective. `--economics` (and the
+dashboard's Opportunity cost section) prices what the saving actually costs:
+
+```
+  Tax avoided now                          ₹0
+  Future tax saved (PV)               ₹10,755
+  Transaction costs                     -₹330
+  ────────────────────────────────────────────
+  Net benefit                         ₹10,424
+
+  Quant Small Cap - Direct Growth    net      ₹6,752
+    Worth doing — ₹6,752 net, against ₹3,283 of one-sigma gap risk.
+
+  Is waiting worth it?
+    Tata Consultancy Services          saves     ₹3,302 (0.9% of position)
+      Tax saving is noise here: 0.9% of the position against a 6.0% one-sigma
+      move over 28d. Decide on the merits, not the tax.
+```
+
+Three trade-offs get quantified:
+
+- **Harvesting.** The benefit is *deferred* — you save 12.5% of the harvested gain at some future
+  sale — so it is discounted to present value, then netted against round-trip charges, exit load
+  and the days you spend out of the market. Two costs are easy to miss and are flagged every time:
+  rebought units start a **fresh 12-month holding period**, and for equity a same-session buy-back
+  may be netted as an intraday trade, in which case no delivery-based capital gain arises and the
+  harvest achieves nothing.
+- **Deferring.** The star metric is the **breakeven decline** — the price fall that exactly cancels
+  the tax saved — measured against the position's actual volatility over that window. Saving 0.9%
+  of position value while accepting a 6% one-sigma move is not a reason to keep holding.
+- **Selling anyway.** When a position should be exited on its merits, refusing to pay 12.5% can
+  cost far more than the tax.
+
+In HARVEST mode "tax avoided now" is deliberately **excluded** from the net benefit: you rebuy the
+position, so the alternative is doing nothing, not selling out. Counting it would flatter the
+result by an order of magnitude.
+
+One caveat runs through all of it: harvesting only pays if your realised gains exceed the ₹1.25L
+exemption **in the year you eventually sell**. If you would have been under it anyway, the harvest
+sheltered nothing.
+
+Costs are broker- and scheme-specific — check [`fpa/planner/costs.yaml`](fpa/planner/costs.yaml)
+against your actual brokerage and exit loads before trusting the net numbers.
+
 ## What it does and doesn't do
 
-**Does:** FIFO tax lots with correct STCG/LTCG split · zero-tax sell planning · "wait N days"
-deferral advice · XIRR on real cashflows · equity technicals · FY tax summary with carry-forward.
+**Does:** FIFO tax lots with correct STCG/LTCG split · zero-tax sell planning · opportunity-cost
+and breakeven analysis · "wait N days" deferral advice · XIRR on real cashflows · equity technicals
+· FY tax summary with carry-forward.
 
 **Doesn't:** place orders (it never transacts), predict prices, handle F&O, or need an API key.
 
@@ -106,7 +154,9 @@ fpa/
 │   ├── rates.yaml   ← the only place rates are defined
 │   └── engine.py    set-off, exemption, liability
 ├── planner/
-│   └── sell_planner.py    the zero-tax planner
+│   ├── sell_planner.py    the zero-tax planner
+│   ├── opportunity.py     what the tax saving costs
+│   └── costs.yaml         ← check against your broker
 ├── analysis/        technicals (equity only), XIRR/drawdown
 ├── ingest/          AMFI, yfinance
 └── cli.py
@@ -123,7 +173,7 @@ get XIRR, rolling returns and overlap instead.
 ## Tests
 
 ```bash
-python -m pytest tests/ -q     # 48 tests
+python -m pytest tests/ -q     # 67 tests
 ```
 
 The load-bearing invariant — every plan produces exactly zero tax — is tested directly, alongside
@@ -133,6 +183,7 @@ stale rates is worse than no suite.
 
 ## Status
 
-Built: tax engine, FIFO lots, sell planner, AMFI + yfinance ingest, dashboard, sample data.
+Built: tax engine, FIFO lots, sell planner, opportunity-cost analysis, AMFI + yfinance ingest,
+dashboard, sample data. Plans a 10,000-lot ledger in ~1.3s.
 Not yet: CAS PDF parser, fundamentals ingest, standing rules engine with alerts, rebalancing,
-backtest mode. See [DESIGN.md](DESIGN.md) §11 for phasing.
+backtest mode. See [DESIGN.md](DESIGN.md) §12 for phasing.

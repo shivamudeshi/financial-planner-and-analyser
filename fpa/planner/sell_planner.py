@@ -423,9 +423,16 @@ class SellPlanner:
 
         if ok(view.quantity):
             return view.quantity
-        if not ok(0):
+
+        # Probe the smallest order worth placing before bisecting. Once the gain
+        # budget is spent, every remaining candidate would otherwise burn 48
+        # iterations converging on a quantity that gets discarded as dust — which
+        # is the difference between seconds and half a minute on a large ledger.
+        min_qty = MIN_ORDER_PAISE / view.price if view.price else 0.0
+        if min_qty >= view.quantity or not ok(min_qty):
             return 0.0
-        lo, hi = 0.0, view.quantity
+
+        lo, hi = min_qty, view.quantity
         for _ in range(48):
             mid = (lo + hi) / 2
             if ok(mid):

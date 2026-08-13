@@ -13,6 +13,7 @@ from fpa.db import DEFAULT_DB, connect, financial_year, fy_bounds
 from fpa.ingest.equity_prices import staleness
 from fpa.lots import brought_forward, realised_gains
 from fpa.money import fmt, fmt_compact, to_rupees
+from fpa.planner.opportunity import OpportunityAnalyser
 from fpa.planner.sell_planner import Mode, SellPlanner
 from fpa.portfolio import positions
 from fpa.tax.engine import TaxEngine, Term
@@ -163,10 +164,73 @@ def render_planner():
             hide_index=True, use_container_width=True,
         )
 
+    render_economics(plan)
+
     for w in plan.warnings:
         st.warning(w)
     with st.expander("How this plan was built", expanded=not plan.actions):
         for n in plan.notes:
+            st.markdown(f"- {n}")
+
+
+def render_economics(plan):
+    """What the tax saving costs. The counterweight to the plan above."""
+    st.divider()
+    st.subheader("Opportunity cost")
+    st.caption(
+        "Tax is not the objective. This is what achieving the plan above actually costs, "
+        "and whether the saving is large or small next to the price risk you take on."
+    )
+
+    report = OpportunityAnalyser(conn, engine).analyse(plan, as_of=as_of)
+
+    m = st.columns(4)
+    m[0].metric("Tax avoided now", fmt_compact(report.tax_avoided_now))
+    m[1].metric("Future tax saved (PV)", fmt_compact(report.future_tax_saved_pv),
+                help="Discounted value of tax escaped later thanks to a higher cost basis.")
+    m[2].metric("Transaction costs", fmt_compact(-report.transaction_costs),
+                help="Brokerage, STT, stamp duty, GST, DP charges and exit load.")
+    m[3].metric("Net benefit", fmt_compact(report.net_benefit),
+                delta="worth doing" if report.net_benefit > 0 else "not worth it",
+                delta_color="normal" if report.net_benefit > 0 else "inverse")
+
+    if report.harvests:
+        st.markdown("**Is each harvest worth doing?**")
+        st.dataframe(
+            pd.DataFrame([{
+                "Instrument": h.name,
+                "Turnover": float(to_rupees(h.value)),
+                "Future tax saved (PV)": float(to_rupees(h.future_tax_saved_pv)),
+                "Round-trip cost": float(to_rupees(h.round_trip_cost)),
+                "Days out of market": h.gap_days,
+                "Gap risk (1σ)": float(to_rupees(h.gap_risk)),
+                "Net": float(to_rupees(h.net_benefit)),
+                "Verdict": h.verdict,
+            } for h in report.harvests]),
+            hide_index=True, use_container_width=True,
+        )
+
+    if report.deferrals:
+        st.markdown("**Is waiting for long-term worth the price risk?**")
+        st.caption(
+            "Breakeven is the price fall that exactly cancels the tax saved. When volatility "
+            "over the wait dwarfs it, the tax is not what should drive the decision."
+        )
+        st.dataframe(
+            pd.DataFrame([{
+                "Instrument": d.name,
+                "Wait": f"{d.days_to_wait}d",
+                "Tax saved": float(to_rupees(d.tax_saved)),
+                "Breakeven fall %": round(d.breakeven_decline_pct, 2),
+                "Volatility over wait %": round(d.volatility_pct, 1) if d.volatility_pct else None,
+                "Risk ÷ reward": round(d.risk_multiple, 1) if d.risk_multiple else None,
+                "Verdict": d.verdict,
+            } for d in report.deferrals]),
+            hide_index=True, use_container_width=True,
+        )
+
+    with st.expander("Assumptions behind these numbers"):
+        for n in report.notes:
             st.markdown(f"- {n}")
 
 

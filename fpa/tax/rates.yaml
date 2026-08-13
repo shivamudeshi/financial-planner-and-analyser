@@ -1,0 +1,68 @@
+# Capital gains parameters, by Indian financial year.
+#
+# ⚠ VERIFY AGAINST THE CURRENT FINANCE ACT BEFORE RELYING ON ANY NUMBER HERE.
+# Rates moved materially in the July 2024 Budget and can move at any Budget.
+# This file is the single place they are defined; every figure the app prints
+# is stamped with the FY key it was computed under.
+#
+# Amounts are in RUPEES here for readability and converted to paise on load.
+
+default_fy: "2026-27"
+
+fy:
+  "2024-25":
+    # Budget Jul-2024 changed rates mid-year; the values below are the
+    # post-23-Jul-2024 regime. Pre-23-Jul disposals used 15% / 10% / 1L.
+    long_term_holding_days:
+      EQUITY: 365
+      EQUITY_MF: 365
+      OTHER: 1095
+    equity_stcg_rate: 0.20          # s.111A, STT paid
+    equity_ltcg_rate: 0.125         # s.112A
+    equity_ltcg_exemption: 125000   # s.112A aggregate annual exemption
+    other_ltcg_rate: 0.125
+    slab_rate: 0.30                 # your marginal rate; used for debt MF / non-112A STCG
+    cess: 0.04                      # health & education cess on tax
+    loss_carry_forward_years: 8
+
+  "2025-26":
+    long_term_holding_days:
+      EQUITY: 365
+      EQUITY_MF: 365
+      OTHER: 1095
+    equity_stcg_rate: 0.20
+    equity_ltcg_rate: 0.125
+    equity_ltcg_exemption: 125000
+    other_ltcg_rate: 0.125
+    slab_rate: 0.30
+    cess: 0.04
+    loss_carry_forward_years: 8
+
+  "2026-27":
+    # ⚠ CARRIED FORWARD FROM FY 2025-26 AS A PLACEHOLDER, NOT VERIFIED against a
+    # Finance Act. Check every value below before you act on a number the app
+    # prints for this year.
+    long_term_holding_days:
+      EQUITY: 365
+      EQUITY_MF: 365
+      OTHER: 1095
+    equity_stcg_rate: 0.20
+    equity_ltcg_rate: 0.125
+    equity_ltcg_exemption: 125000
+    other_ltcg_rate: 0.125
+    slab_rate: 0.30
+    cess: 0.04
+    loss_carry_forward_years: 8
+
+# Set-off rules, per s.70/71. Encoded rather than hardcoded so the engine can
+# be audited against the Act.
+setoff:
+  # Short-term capital LOSS may be set off against both short- and long-term gains.
+  short_term_loss_against: [SHORT_TERM, LONG_TERM]
+  # Long-term capital LOSS may be set off ONLY against long-term gains.
+  long_term_loss_against: [LONG_TERM]
+
+# s.112A grandfathering for equity acquired before this date:
+#   cost = max(actual_cost, min(fmv_on_date, sale_price))
+grandfather:
+  date: "2018-01-31"

@@ -9,14 +9,15 @@ listed equities**. Single user. No F&O, no intraday, no external hosting.
 
 ### Goals
 
-1. **Plan** — set yearly targets (investable surplus, asset allocation, SIP schedule) and see actual
-   vs. plan as the year progresses.
-2. **Track** — one combined view of MF and equity holdings with correct cost basis, realised and
-   unrealised P&L, and XIRR.
-3. **Decide when to sell** — a rules engine that evaluates *your* explicit exit criteria daily and
-   raises alerts. Rules you wrote, not signals from a black box.
-4. **Analyse** — technicals and fundamentals on the equity side, rolling-return and
-   attribution metrics on the MF side.
+1. **Decide what to sell this financial year, at zero tax** — the centrepiece. Given today's lots
+   and prices, find the largest set of sales that keeps the year's capital-gains tax at exactly
+   zero. See §6.
+2. **Track** — one combined view of MF and equity holdings with correct FIFO cost basis, realised
+   and unrealised P&L, and XIRR.
+3. **Plan** — yearly targets (investable surplus, asset allocation, SIP schedule) and actual vs.
+   plan as the year progresses.
+4. **Analyse** — technicals and fundamentals on the equity side, rolling-return and attribution
+   metrics on the MF side.
 
 ### Non-goals
 
@@ -262,7 +263,60 @@ RSI or MACD on it is a category error. MF analysis is:
 
 ---
 
-## 6. Rules engine — the "when to sell" part
+## 6. The zero-tax sell planner  ✅ built
+
+Three features of Indian capital-gains law make an annual planner worth having, and together they
+define the whole problem:
+
+1. **The s.112A exemption is use-it-or-lose-it.** ₹1.25 lakh of long-term equity gain per financial
+   year is tax-free, and unused exemption does *not* carry forward. Every year you finish under the
+   limit, the remainder is gone permanently.
+2. **The 12-month line is worth a lot and its date is knowable.** Short-term equity gain is taxed at
+   20% from the first rupee; long-term at 12.5% after the exemption. A lot 40 days short of
+   long-term is a very different asset from one 40 days past it.
+3. **Set-off is mandatory (s.70), but its ordering is not.** You cannot elect to bank a loss while
+   holding gains in the same year — the loss *must* be set off. This cuts both ways, and getting it
+   right is most of the value here.
+
+### The loss insight
+
+That third point is where naive planning goes wrong, in both directions:
+
+- Book a loss with no gain to shelter, and it is **destroyed** — set off against gain the exemption
+  was already covering, buying nothing.
+- But book a loss *alongside extra gains*, and every rupee of loss **adds a rupee** to the zero-tax
+  budget. With ₹3L of unrealised gain and a ₹1L loss on a position you want out of, the right plan
+  realises ₹2.25L of gain — ₹1.25L exemption plus ₹1L sheltered by the loss — not ₹1.25L.
+
+So the planner books losses *before* selecting gains, and caps them at what the available gains can
+actually absorb. The surplus is reported, not realised.
+
+### Two modes
+
+| Mode | Objective | Lot preference |
+|---|---|---|
+| **EXIT** | Free the most capital from positions you want out of | **Lowest** gain % — releases the most market value per rupee of gain budget |
+| **HARVEST** | Step up cost basis for free | **Highest** gain % — same gain realised on less turnover, so less brokerage and less time out of the market |
+
+Deliberately opposite preferences under the same constraint, and both are tested.
+
+### How the constraint is enforced
+
+Gain is linear in quantity and tax is monotonic in gain, so the planner **bisects on quantity using
+the real tax engine as the oracle** — no bucket-level reasoning is duplicated, and set-off rules
+live in exactly one place. Quantities round *down* to tradeable size (whole shares, 3-dp MF units);
+rounding up would break the invariant. Every proposal is re-verified after quantisation.
+
+### Outputs
+
+- **Orders to place**, one row per instrument (your broker applies FIFO across lots itself — a
+  three-year SIP is 36 lots but one redemption), with lot detail underneath for the tax record.
+- **"Wait, don't sell"** — short-term lots that become long-term, with the date and the rupee cost
+  of selling early.
+- **Warnings** — losses held back because there is not enough gain to absorb them.
+- **Unused exemption**, with the reminder that it expires on 31 March.
+
+## 7. Rules engine — ongoing alerts
 
 Declarative YAML, evaluated every evening after prices refresh. Each rule produces alerts, never
 orders.
@@ -336,7 +390,7 @@ building before you rely on any rule with real money.
 
 ---
 
-## 7. Planner
+## 8. Yearly planner
 
 - **Yearly targets** — investable surplus, target allocation by asset class, per-goal earmarking.
 - **SIP schedule** — expected monthly outflow, tracked against actual. Flags missed SIPs.
@@ -347,7 +401,7 @@ building before you rely on any rule with real money.
 
 ---
 
-## 8. Tax
+## 9. Tax
 
 `tax/rates.yaml`, versioned by financial year. Current assumptions for FY 2025-26 on listed equity
 and equity-oriented MFs:
@@ -368,7 +422,7 @@ short/long, tax-loss-harvesting candidates, and a "days until long-term" list.
 
 ---
 
-## 9. Dashboard
+## 10. Dashboard
 
 Streamlit, one command, opens locally.
 
@@ -391,7 +445,7 @@ ntfy.sh — keyless, no app to install.
 
 ---
 
-## 10. Phasing
+## 11. Phasing
 
 | Phase | Scope | Outcome |
 |---|---|---|
@@ -404,7 +458,7 @@ Phases 1–3 need **no API key and no paid service**.
 
 ---
 
-## 11. Risks and open questions
+## 12. Risks and open questions
 
 **Risks**
 

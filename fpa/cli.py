@@ -14,7 +14,7 @@ from datetime import date as Date
 
 from .db import DEFAULT_DB, connect, financial_year
 from .lots import rebuild
-from .money import fmt, fmt_compact
+from .money import fmt, fmt_compact, to_paise
 from .planner.sell_planner import Mode, SellPlanner
 from .tax.engine import TaxEngine, Term
 
@@ -143,6 +143,117 @@ def _print_economics(conn, plan, *, engine, as_of: str) -> None:
         print(f"\n    · {n}")
 
 
+def cmd_import_cas(args) -> int:
+    from .ingest import cas
+
+    conn = connect(args.db)
+    try:
+        statement = cas.parse(args.path, args.password)
+    except ValueError as exc:
+        print(f"Could not read the CAS: {exc}", file=sys.stderr)
+        return 2
+
+    print(f"\n  CAS {statement.period_from or '?'} to {statement.period_to or '?'}")
+    print(f"  {len(statement.schemes)} scheme(s), {statement.transaction_count} transaction(s)\n")
+
+    for s in statement.schemes:
+        mark = "✓" if s.reconciles and s.is_complete else ("~" if s.reconciles else "✗")
+        print(f"   {mark} {s.name[:46]:<46} {len(s.transactions):>3} txn  "
+              f"closing {s.closing_balance if s.closing_balance is not None else '?'}")
+        if not s.reconciles:
+            print(f"       computed {s.computed_balance:.3f}, statement says "
+                  f"{s.closing_balance}, off by {s.discrepancy:+.3f} units")
+        elif not s.is_complete:
+            print(f"       opens with {s.opening_balance:.3f} units carried in from before "
+                  f"{statement.period_from or 'the statement'} — cost basis unknown")
+
+    result = cas.import_statement(
+        conn, statement, dry_run=args.dry_run, allow_partial=args.allow_partial
+    )
+    print(f"\n  {result.transactions_added} transaction(s) "
+          f"{'would be added' if args.dry_run else 'added'}, "
+          f"{result.duplicates_skipped} duplicate(s) skipped, "
+          f"{result.schemes_created} new scheme(s).")
+
+    for w in statement.warnings:
+        print(f"  ⚠  {w}")
+    for n in result.notes:
+        print(f"  · {n}")
+    if not args.dry_run and result.transactions_added:
+        stats = rebuild(conn)
+        print(f"  Rebuilt {stats['lots']} lots, {stats['disposals']} disposals.")
+    print()
+    return 1 if result.rejected else 0
+
+
+def cmd_import_tradebook(args) -> int:
+    from .ingest import tradebook
+
+    conn = connect(args.db)
+    parsed = tradebook.parse_file(args.path)
+    if not parsed.trades:
+        for w in parsed.warnings:
+            print(f"  ⚠  {w}", file=sys.stderr)
+        return 2
+
+    result = tradebook.import_trades(conn, parsed, dry_run=args.dry_run)
+    print(f"\n  {len(parsed.trades)} trade(s) parsed.")
+    print(f"  {result.transactions_added} {'would be added' if args.dry_run else 'added'}, "
+          f"{result.duplicates_skipped} duplicate(s) skipped, "
+          f"{result.instruments_created} new instrument(s).")
+    for w in parsed.warnings:
+        print(f"  ⚠  {w}")
+    for n in result.notes:
+        print(f"  · {n}")
+    if not args.dry_run and result.transactions_added:
+        stats = rebuild(conn)
+        print(f"  Rebuilt {stats['lots']} lots, {stats['disposals']} disposals.")
+    print()
+    return 0
+
+
+def cmd_sip(args) -> int:
+    from .planner import cashflow
+
+    conn = connect(args.db)
+    if args.sip_command == "add":
+        cashflow.add_plan(
+            conn, args.amount, label=args.label, day_of_month=args.day,
+            start_date=args.start, step_up_pct=args.step_up,
+            step_up_cap_rupees=args.cap,
+        )
+        print(f"Added {args.label}: {fmt(to_paise(args.amount))}/month on day {args.day}"
+              + (f", stepping up {args.step_up}% a year" if args.step_up else ""))
+        return 0
+
+    fy = args.fy or financial_year(args.as_of or Date.today().isoformat())
+    flow = cashflow.fy_cashflow(conn, fy, as_of=args.as_of)
+    print(f"\n  SIP cashflow — FY {fy}")
+    print(f"  {'─' * 60}")
+    print(f"    Planned this year   {fmt(flow.planned):>16}")
+    print(f"    Invested so far     {fmt(flow.actual):>16}  ({flow.completion_pct:.0f}%)")
+    print(f"    Remaining scheduled {fmt(flow.remaining_scheduled):>16}")
+    if flow.behind_by:
+        print(f"    Behind plan by      {fmt(flow.behind_by):>16}  ← instalments due but unpaid")
+    if flow.by_instrument:
+        print(f"\n  By destination:")
+        for name, amt in sorted(flow.by_instrument.items(), key=lambda kv: -kv[1]):
+            print(f"    {name[:40]:<40} {fmt(amt):>14}")
+
+    plans = cashflow.load_plans(conn)
+    if plans and args.project:
+        print(f"\n  Projected contribution over {args.project} years:")
+        for year, amount in cashflow.project(plans, args.project):
+            print(f"    {year}   {fmt(amount):>14}")
+        total = sum(a for _, a in cashflow.project(plans, args.project))
+        print(f"    {'Total':<9} {fmt(total):>14}")
+
+    for n in flow.notes:
+        print(f"\n  · {n}")
+    print()
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="fpa", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -169,6 +280,40 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--fy", default=None)
     s.add_argument("--as-of", default=None)
     s.set_defaults(func=cmd_plan)
+
+    s = sub.add_parser("import-cas", help="import a CAMS/KFintech CAS PDF")
+    s.add_argument("path")
+    s.add_argument("--password", default=None,
+                   help="CAS password (often your PAN in capitals)")
+    s.add_argument("--dry-run", action="store_true",
+                   help="parse and reconcile without writing — run this first")
+    s.add_argument("--allow-partial", action="store_true",
+                   help="import schemes whose statement starts mid-history, accepting that "
+                        "their opening units have no cost basis")
+    s.set_defaults(func=cmd_import_cas)
+
+    s = sub.add_parser("import-tradebook", help="import a broker tradebook CSV")
+    s.add_argument("path")
+    s.add_argument("--dry-run", action="store_true")
+    s.set_defaults(func=cmd_import_tradebook)
+
+    s = sub.add_parser("sip", help="SIP schedule and financial-year cashflow")
+    sip_sub = s.add_subparsers(dest="sip_command")
+    s.add_argument("--fy", default=None)
+    s.add_argument("--as-of", default=None)
+    s.add_argument("--project", type=int, default=0, metavar="YEARS",
+                   help="project total contribution over N years")
+    s.set_defaults(func=cmd_sip, sip_command=None)
+
+    a = sip_sub.add_parser("add", help="add a SIP plan")
+    a.add_argument("amount", type=float, help="monthly instalment in rupees")
+    a.add_argument("--label", default="SIP")
+    a.add_argument("--day", type=int, default=5, help="day of month")
+    a.add_argument("--start", default=None)
+    a.add_argument("--step-up", type=float, default=0.0,
+                   help="annual step-up percent, applied on each anniversary")
+    a.add_argument("--cap", type=float, default=None, help="ceiling in rupees")
+    a.set_defaults(func=cmd_sip, sip_command="add", fy=None, as_of=None, project=0)
 
     args = p.parse_args(argv)
     return args.func(args)

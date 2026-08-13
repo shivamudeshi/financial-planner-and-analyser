@@ -363,7 +363,45 @@ three-year SIP redemption is mostly load-free.
 
 ---
 
-## 8. Rules engine — ongoing alerts
+## 8. Import — CAS and tradebook  ✅ built
+
+A CAS covers mutual funds; a broker tradebook covers equities. Together they are the whole portfolio,
+and both are free.
+
+### The importer refuses to guess
+
+Statement layouts vary between CAMS and KFintech, change over time, and differ by AMC. A parser that
+silently mis-reads one line produces a wrong cost basis → a wrong capital gain → a wrong tax number,
+noticed only when it matters. So the CAS importer writes only what it can prove:
+
+**Reconciliation.** The CAS states its own `Closing Unit Balance`. The parser recomputes it from the
+transactions extracted; any scheme where the two disagree beyond rounding is rejected with the
+discrepancy shown. This is what makes the parser trustworthy despite being built against a format
+that cannot be exhaustively tested.
+
+**Completeness.** A non-zero `Opening Unit Balance` means units were acquired before the statement
+period — no purchase record, so no cost basis and no acquisition date. Held back by default, with a
+prompt to re-request the CAS from inception. `--allow-partial` overrides.
+
+The second guard was found by an end-to-end test through a real encrypted PDF, not by the text
+fixtures: the parse reconciled perfectly and the import still silently dropped 100 units.
+
+### Design notes
+
+- **Charge rows are not transactions.** `*** Stamp Duty ***` and STT lines have the same shape as
+  trades but no units; treating them as trades breaks the unit balance, which the reconciliation
+  then catches.
+- **The description is authoritative about direction.** Some statements print redemption units
+  without parentheses, so sign is taken from "Redemption"/"Switch Out", not from the number.
+- **Dedupe by content hash**, so overlapping statements can be re-imported safely.
+- **Tradebook columns are mapped by alias**, not per broker. A missing required column is named,
+  not guessed around.
+- Tradebooks rarely carry charges (they live in the contract note), so those are estimated from
+  `costs.yaml` and the count of estimated rows is reported, since it feeds cost basis.
+
+---
+
+## 9. Rules engine — ongoing alerts
 
 Declarative YAML, evaluated every evening after prices refresh. Each rule produces alerts, never
 orders.
@@ -437,10 +475,31 @@ building before you rely on any rule with real money.
 
 ---
 
-## 9. Yearly planner
+## 10. Yearly planner and SIP cashflow  ✅ partly built
+
+Step-up SIP is modelled as a first-class thing, not a footnote: ₹17,000/month rising 10% a year
+contributes **₹32.5 lakh** over ten years against **₹20.4 lakh** flat, and you cannot plan a year
+without knowing what the instalment becomes. The increase lands on each **anniversary of the SIP
+start date** — how AMCs actually implement it — not on 1 April, so a mid-year start means a mid-FY
+step.
+
+Two distinctions the module is careful about:
+
+- **Behind plan vs. not yet due.** Early in a year most of the shortfall is simply instalments that
+  have not come round yet. `behind_by` reports only what was due and unpaid.
+- **SIP execution vs. any purchase.** Only `SIP`-kind transactions count as instalments. Folding in
+  every `BUY` would let a one-off lump sum masquerade as instalments you never paid.
+
+`deployable()` adds remaining SIP to what the sell planner frees, because they are one pool of
+money. When remaining SIP already exceeds what a sale would free, it says so — redirecting SIP costs
+nothing, while selling costs charges and a holding-period reset.
+
+Projections report **contribution only**, with no assumed return: a projection that compounds an
+invented growth rate tells you more about the assumption than about the plan.
+
+Still to build:
 
 - **Yearly targets** — investable surplus, target allocation by asset class, per-goal earmarking.
-- **SIP schedule** — expected monthly outflow, tracked against actual. Flags missed SIPs.
 - **Progress** — actual vs. plan, by month, cumulative.
 - **Rebalancing** — given drift, compute the minimum set of trades to return to target, preferring
   (a) redirecting *new* money over selling, and (b) selling long-term lots over short-term ones.
@@ -448,7 +507,7 @@ building before you rely on any rule with real money.
 
 ---
 
-## 10. Tax
+## 11. Tax
 
 `tax/rates.yaml`, versioned by financial year. Current assumptions for FY 2025-26 on listed equity
 and equity-oriented MFs:
@@ -469,7 +528,7 @@ short/long, tax-loss-harvesting candidates, and a "days until long-term" list.
 
 ---
 
-## 11. Dashboard
+## 12. Dashboard
 
 Streamlit, one command, opens locally.
 
@@ -492,7 +551,7 @@ ntfy.sh — keyless, no app to install.
 
 ---
 
-## 12. Phasing
+## 13. Phasing
 
 | Phase | Scope | Outcome |
 |---|---|---|
@@ -505,7 +564,7 @@ Phases 1–3 need **no API key and no paid service**.
 
 ---
 
-## 13. Risks and open questions
+## 14. Risks and open questions
 
 **Risks**
 

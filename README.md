@@ -14,6 +14,8 @@ Its centrepiece answers one narrow question well:
 pip install -r requirements.txt
 
 python -m fpa.cli sample     # generate a sample portfolio to explore
+python -m fpa.cli import-cas statement.pdf --password ABCDE1234F --dry-run
+python -m fpa.cli import-tradebook trades.csv
 python -m fpa.cli plan       # print this FY's zero-tax sell plan
 python -m fpa.cli plan --economics --mode HARVEST   # ...and what it costs
 streamlit run app.py         # dashboard
@@ -112,11 +114,62 @@ sheltered nothing.
 Costs are broker- and scheme-specific — check [`fpa/planner/costs.yaml`](fpa/planner/costs.yaml)
 against your actual brokerage and exit loads before trusting the net numbers.
 
+## Importing your real data
+
+```bash
+python -m fpa.cli import-cas statement.pdf --password ABCDE1234F --dry-run
+python -m fpa.cli import-tradebook tradebook.csv --dry-run
+```
+
+**CAS** (mutual funds) — request the **detailed** statement from camsonline.com or kfintech.com,
+covering the period **from inception**, not just this year. Password is usually your PAN in capitals.
+
+**Tradebook** (equities) — any broker's CSV export. Column names are mapped by alias, so Zerodha,
+Groww and Upstox exports all work without configuration. If a required column is missing the import
+says which one rather than guessing.
+
+### Two guards that refuse to import
+
+A wrong cost basis flows straight into a wrong capital gain, which flows into a wrong tax number —
+the kind of failure you would not notice until it mattered. So the CAS importer only writes what it
+can prove:
+
+- **Reconciliation.** The CAS states its own `Closing Unit Balance`. The parser recomputes that from
+  the transactions it extracted, and any scheme where the two disagree is **rejected**, with the
+  discrepancy shown. A parse that cannot prove itself correct does not get to write to your ledger.
+- **Completeness.** A non-zero `Opening Unit Balance` means units were acquired *before* the
+  statement period, so their cost basis and acquisition date are absent from the file. Those schemes
+  are **held back** with a prompt to re-request the CAS from inception. `--allow-partial` overrides
+  it if you intend to supply the opening lots yourself.
+
+Both importers are idempotent — re-importing overlapping statements skips duplicates — and both
+support `--dry-run`. Run that first.
+
+Tradebooks rarely include charges (those live in the contract note), so they are estimated from
+`costs.yaml` and the import tells you how many rows used an estimate.
+
+## SIP planning, with step-up
+
+```bash
+python -m fpa.cli sip add 17000 --day 5 --step-up 10
+python -m fpa.cli sip --project 10
+```
+
+Step-up is modelled properly rather than as a footnote, because it changes the commitment
+materially — ₹17,000/month rising 10% a year contributes **₹32.5 lakh** over ten years against
+**₹20.4 lakh** flat. The increase applies on each anniversary of the SIP start date, which is how
+AMCs actually implement it, not on 1 April.
+
+The Cashflow page separates *behind plan* (instalments due but unpaid) from *not yet due*, and adds
+remaining SIP to what the sell planner frees — because they are one pool of deployable money, and
+treating them separately is how people sell to fund something their SIP was already going to cover.
+
 ## What it does and doesn't do
 
 **Does:** FIFO tax lots with correct STCG/LTCG split · zero-tax sell planning · opportunity-cost
-and breakeven analysis · "wait N days" deferral advice · XIRR on real cashflows · equity technicals
-· FY tax summary with carry-forward.
+and breakeven analysis · "wait N days" deferral advice · CAS and tradebook import with
+reconciliation · step-up SIP planning · XIRR on real cashflows · equity technicals · FY tax summary
+with carry-forward.
 
 **Doesn't:** place orders (it never transacts), predict prices, handle F&O, or need an API key.
 
@@ -127,7 +180,8 @@ and breakeven analysis · "wait N days" deferral advice · XIRR on real cashflow
 | MF NAV, all ~12k schemes | AMFI `NAVAll.txt` |
 | MF NAV history | mfapi.in (unofficial AMFI mirror) |
 | Equity OHLCV | Yahoo Finance via `yfinance` (`RELIANCE.NS`) |
-| Your holdings | CAMS/KFintech CAS PDF, broker tradebook CSV |
+| Your MF holdings | CAMS/KFintech CAS PDF — `import-cas` |
+| Your equity holdings | Broker tradebook CSV — `import-tradebook` |
 
 `python -m fpa.cli refresh` pulls the latest of both. A broker API (Angel One / Dhan / Upstox) is an
 optional later addition for live quotes — the ingest boundary is deliberately narrow so it slots in
@@ -157,8 +211,9 @@ fpa/
 │   ├── sell_planner.py    the zero-tax planner
 │   ├── opportunity.py     what the tax saving costs
 │   └── costs.yaml         ← check against your broker
+│   └── cashflow.py    step-up SIP schedule, FY inflow
 ├── analysis/        technicals (equity only), XIRR/drawdown
-├── ingest/          AMFI, yfinance
+├── ingest/          AMFI, yfinance, CAS PDF, broker tradebook
 └── cli.py
 app.py               Streamlit dashboard
 ```
@@ -173,7 +228,7 @@ get XIRR, rolling returns and overlap instead.
 ## Tests
 
 ```bash
-python -m pytest tests/ -q     # 67 tests
+python -m pytest tests/ -q     # 136 tests
 ```
 
 The load-bearing invariant — every plan produces exactly zero tax — is tested directly, alongside
@@ -183,7 +238,7 @@ stale rates is worse than no suite.
 
 ## Status
 
-Built: tax engine, FIFO lots, sell planner, opportunity-cost analysis, AMFI + yfinance ingest,
-dashboard, sample data. Plans a 10,000-lot ledger in ~1.3s.
-Not yet: CAS PDF parser, fundamentals ingest, standing rules engine with alerts, rebalancing,
-backtest mode. See [DESIGN.md](DESIGN.md) §12 for phasing.
+Built: tax engine, FIFO lots, sell planner, opportunity-cost analysis, CAS PDF and tradebook
+import, step-up SIP planning, AMFI + yfinance ingest, dashboard, sample data. Plans a 10,000-lot
+ledger in ~1.3s.
+Not yet: fundamentals ingest, standing rules engine with alerts, rebalancing, backtest mode. See [DESIGN.md](DESIGN.md) §13 for phasing.

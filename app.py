@@ -13,6 +13,7 @@ from fpa.db import DEFAULT_DB, connect, financial_year, fy_bounds
 from fpa.ingest.equity_prices import staleness
 from fpa.lots import brought_forward, realised_gains
 from fpa.money import fmt, fmt_compact, to_rupees
+from fpa.planner import cashflow
 from fpa.planner.opportunity import OpportunityAnalyser
 from fpa.planner.sell_planner import Mode, SellPlanner
 from fpa.portfolio import positions
@@ -52,7 +53,7 @@ fy = st.sidebar.selectbox(
 engine = TaxEngine(fy)
 page = st.sidebar.radio(
     "View",
-    ["Sell planner", "Overview", "Holdings", "Tax", "Analysis"],
+    ["Sell planner", "Overview", "Holdings", "Cashflow", "Tax", "Analysis"],
 )
 
 # `or` would be wrong here: days_stale of 0 is the freshest possible value, not
@@ -442,5 +443,86 @@ def render_analysis():
             )
 
 
+def render_cashflow():
+    st.title(f"Cashflow — FY {fy}")
+    st.caption(
+        "What goes in, alongside what the sell planner frees. The two are one pool of "
+        "deployable money, and treating them separately is how people sell to fund something "
+        "their SIP was already covering."
+    )
+
+    flow = cashflow.fy_cashflow(conn, fy, as_of=as_of)
+    plans = cashflow.load_plans(conn)
+
+    m = st.columns(4)
+    m[0].metric("Planned this year", fmt_compact(flow.planned))
+    m[1].metric("Invested so far", fmt_compact(flow.actual),
+                delta=f"{flow.completion_pct:.0f}% of plan")
+    m[2].metric("Remaining scheduled", fmt_compact(flow.remaining_scheduled))
+    m[3].metric("Behind plan by", fmt_compact(flow.behind_by),
+                help="Instalments already due but not invested. Excludes what isn't due yet.",
+                delta_color="inverse")
+
+    with st.expander("Add a SIP plan", expanded=not plans):
+        c = st.columns(5)
+        amount = c[0].number_input("Monthly ₹", 500, 10_00_000, 17_000, step=1_000)
+        day = c[1].number_input("Day", 1, 28, 5)
+        step_up = c[2].number_input("Step-up %/yr", 0.0, 50.0, 10.0, step=1.0,
+                                    help="Applied on each anniversary of the start date, "
+                                         "which is how AMCs implement it.")
+        start = c[3].date_input("Starts", value=Date.fromisoformat(as_of))
+        names = {"(whole portfolio)": None} | {p.name: p.instrument_id for p in pos}
+        target = c[4].selectbox("Into", list(names))
+        if st.button("Add plan"):
+            cashflow.add_plan(conn, float(amount), instrument_id=names[target],
+                              label=target if names[target] else "SIP",
+                              day_of_month=int(day), start_date=start.isoformat(),
+                              step_up_pct=float(step_up))
+            st.rerun()
+
+    if plans:
+        st.subheader("Plans")
+        st.dataframe(pd.DataFrame([{
+            "Label": p.label,
+            "Instalment now": float(to_rupees(p.amount)),
+            "Day": p.day_of_month,
+            "Starts": p.start_date,
+            "Step-up %/yr": p.step_up_pct,
+            "In 5 years": float(to_rupees(p.amount_in_year(5))),
+            "In 10 years": float(to_rupees(p.amount_in_year(10))),
+        } for p in plans]), hide_index=True, use_container_width=True)
+
+        years = st.slider("Project contributions over", 1, 20, 10)
+        rows = cashflow.project(plans, years)
+        st.bar_chart(pd.DataFrame(
+            {"Contribution": [float(to_rupees(a)) for _, a in rows]},
+            index=[f for f, _ in rows],
+        ))
+        total = sum(a for _, a in rows)
+        flat = sum(p.amount * 12 for p in plans) * years
+        st.caption(
+            f"Total contribution over {years} years: **{fmt(total)}**"
+            + (f" — against {fmt(flat)} if the instalment never rose. "
+               f"Contribution only, no assumed return."
+               if total != flat else ". Contribution only, no assumed return.")
+        )
+
+    if flow.by_instrument:
+        st.subheader("Where it goes")
+        st.dataframe(pd.DataFrame([
+            {"Destination": k, "This year": float(to_rupees(v))}
+            for k, v in sorted(flow.by_instrument.items(), key=lambda kv: -kv[1])
+        ]), hide_index=True, use_container_width=True)
+
+    plan = SellPlanner(conn, engine, fy=fy, as_of=as_of).plan(Mode.EXIT)
+    total, notes = cashflow.deployable(plan.proceeds, flow, as_of)
+    st.subheader("Deployable this year")
+    st.metric("Sale proceeds + remaining SIP", fmt_compact(total))
+    for n in notes:
+        st.markdown(f"- {n}")
+    for n in flow.notes:
+        st.info(n)
+
+
 {"Sell planner": render_planner, "Overview": render_overview, "Holdings": render_holdings,
- "Tax": render_tax, "Analysis": render_analysis}[page]()
+ "Cashflow": render_cashflow, "Tax": render_tax, "Analysis": render_analysis}[page]()
